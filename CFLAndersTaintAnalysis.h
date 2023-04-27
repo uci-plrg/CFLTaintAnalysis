@@ -12,13 +12,14 @@
 ///
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_ANALYSIS_CFLANDERSALIASANALYSIS_H
-#define LLVM_ANALYSIS_CFLANDERSALIASANALYSIS_H
+#ifndef LLVM_ANALYSIS_CFLANDERSTAINTANALYSIS_H
+#define LLVM_ANALYSIS_CFLANDERSTAINTANALYSIS_H
 
+#include "CFLTaintAnalysisUtils.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/Analysis/AliasAnalysis.h"
-#include "llvm/Analysis/CFLAliasAnalysisUtils.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Pass.h"
 #include <forward_list>
@@ -30,21 +31,23 @@ class Function;
 class MemoryLocation;
 class TargetLibraryInfo;
 
-namespace cflaa {
+namespace cflta {
 
-struct AliasSummary;
+struct InstantiatedValue;
+ 
+struct AliasTaintSummary;
 
-} // end namespace cflaa
+}
 
-class CFLAndersAAResult : public AAResultBase<CFLAndersAAResult> {
-  friend AAResultBase<CFLAndersAAResult>;
+class CFLAndersTaintResult : public AAResultBase<CFLAndersTaintResult> {
+  friend AAResultBase<CFLAndersTaintResult>;
 
-  class FunctionInfo;
+  class FunctionInfo; 
 
 public:
-  explicit CFLAndersAAResult(const TargetLibraryInfo &TLI);
-  CFLAndersAAResult(CFLAndersAAResult &&RHS);
-  ~CFLAndersAAResult();
+  explicit CFLAndersTaintResult(const TargetLibraryInfo &TLI);
+  CFLAndersTaintResult(CFLAndersTaintResult &&RHS);
+  ~CFLAndersTaintResult();
 
   /// Handle invalidation events from the new pass manager.
   /// By definition, this result is stateless and so remains valid.
@@ -56,14 +59,18 @@ public:
   /// Evict the given function from cache
   void evict(const Function *Fn);
 
-  /// Get the alias summary for the given function
+  
+  /// Get the summary for the given function
   /// Return nullptr if the summary is not found or not available
-  const cflaa::AliasSummary *getAliasSummary(const Function &);
+  const cflta::AliasTaintSummary *getSummary(const Function &);
 
   AliasResult query(const MemoryLocation &, const MemoryLocation &);
   AliasResult alias(const MemoryLocation &, const MemoryLocation &);
 
-  const Optional<std::vector<const Value *>> allValueAliases(const Value *);
+  const Optional<std::vector<const Value *>> allValueAliases(const Value *);  
+
+  const Optional<std::vector<const Value *>> allTaintedValues(const Function&);
+
 private:
   /// Ensures that the given function is available in the cache.
   /// Returns the appropriate entry from the cache.
@@ -74,7 +81,6 @@ private:
 
   /// Build summary for a given function
   FunctionInfo buildInfoFrom(const Function &);
-
   const TargetLibraryInfo &TLI;
 
   /// Cached mapping of Functions to their StratifiedSets.
@@ -84,7 +90,11 @@ private:
   /// that simply has empty sets.
   DenseMap<const Function *, Optional<FunctionInfo>> Cache;
 
-  std::forward_list<cflaa::FunctionHandle<CFLAndersAAResult>> Handles;
+  //TODO: save All globals tainted in some function in a set
+  //DenseSet<cflta::InstantiatedValue> TaintedGlobals;
+
+  //to propagate taint to other functions where the globals is used  
+  std::forward_list<cflta::FunctionHandle<CFLAndersTaintResult>> Handles;
 };
 
 /// Analysis pass providing a never-invalidated alias analysis result.
@@ -97,32 +107,30 @@ class CFLAndersAA : public AnalysisInfoMixin<CFLAndersAA> {
   static AnalysisKey Key;
 
 public:
-  using Result = CFLAndersAAResult;
+  using Result = CFLAndersTaintResult;
 
-  CFLAndersAAResult run(Function &F, FunctionAnalysisManager &AM);
+  CFLAndersTaintResult run(Module &M, ModuleAnalysisManager &MM);
 };
 
-/// Legacy wrapper pass to provide the CFLAndersAAResult object.
-class CFLAndersAAWrapperPass : public FunctionPass {
-  std::unique_ptr<CFLAndersAAResult> Result;
-
+/// Legacy wrapper pass to provide the CFLAndersTaintResult object.
+class CFLAndersTaintWrapperPass : public ModulePass {
+  std::unique_ptr<CFLAndersTaintResult> Result;
+  
+  bool (*taintPredicate) (Value*);
 public:
   static char ID;
 
-  CFLAndersAAWrapperPass();
+  CFLAndersTaintWrapperPass(); 
+  CFLAndersTaintResult &getResult() { return *Result; }
+  const CFLAndersTaintResult &getResult() const { return *Result; }
 
-  CFLAndersAAResult &getResult() { return *Result; }
-  const CFLAndersAAResult &getResult() const { return *Result; }
-
-  bool runOnFunction(Function &F) override;
+  bool runOnModule(Module &M) override;
   //void initializePass() override;
   void getAnalysisUsage(AnalysisUsage &AU) const override;
 };
 
-// createCFLAndersAAWrapperPass - This pass implements a set-based approach to
-// alias analysis.
-FunctionPass *createCFLAndersAAWrapperPass();
+ModulePass *createCFLAndersTaintWrapperPass();
 
 } // end namespace llvm
 
-#endif // LLVM_ANALYSIS_CFLANDERSALIASANALYSIS_H
+#endif 
