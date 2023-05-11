@@ -81,11 +81,17 @@ bool hasUnknownOrCallerAttr(AliasAttrs);
 AliasAttrs getAttrEscaped();
 bool hasEscapedAttr(AliasAttrs);
 
+/// AttrActualArg represent whetehr the said pointer is an actual argument to a
+/// call instruction
+AliasAttrs getAttrActualArg();
+bool hasActualArgAttr(AliasAttrs);
+
 /// AttrGlobal represent whether the said pointer is a global value.
 /// AttrArg represent whether the said pointer is an argument, and if so, what
 /// index the argument has.
 AliasAttrs getGlobalOrArgAttrFromValue(const Value &);
 bool isGlobalOrArgAttr(AliasAttrs);
+bool hasGlobalAttr(AliasAttrs); 
 
 /// Given an AliasAttrs, return a new AliasAttrs that only contains attributes
 /// meaningful to the caller. This function is primarily used for
@@ -236,7 +242,7 @@ inline bool operator>=(InstantiatedValue LHS, InstantiatedValue RHS) {
   return !(LHS < RHS);
 }
 inline raw_ostream &operator<<(raw_ostream &OS, const InstantiatedValue &IV) {
-    return OS << *(IV.Val) << " at level " << IV.DerefLevel;;
+    return OS << *IV.Val << " at level " << IV.DerefLevel;
 }
 
 /// This is the result of instantiating ExternalRelation at a particular

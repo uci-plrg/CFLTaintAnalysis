@@ -63,19 +63,6 @@ class CFLGraph {
 private:
   const TargetLibraryInfo TLI;
 
-  //TODO: figure out how to pass in predicates from client analyses
-  bool TaintPredicate(InstantiatedValue IV) {
-     if (IV.DerefLevel != 0)
-		return false;
-
-	//no deifnitive initializer means it couold be defined in another translation unit
-	 if (auto GV = dyn_cast<GlobalVariable>(IV.Val)) {
-		if (!GV->hasDefinitiveInitializer())
-			return true;
-	 }
-
-	 return isAllocationFn(IV.Val, &TLI); 
-  }
 public:
   CFLGraph(const TargetLibraryInfo& TLI) : TLI(TLI) {}
 
@@ -91,7 +78,6 @@ public:
   struct NodeInfo {
     EdgeList Edges, ReverseEdges;
     AliasAttrs Attr;
-    bool Tainted = false;
   };
 
 
@@ -118,7 +104,7 @@ public:
     }
 
     unsigned getNumLevels() const { return Levels.size(); }
-    
+
   };
 
 private:
@@ -134,33 +120,50 @@ private:
   }
 
 
+  static unsigned inline maxDerefLevel(const Value* V) {
+	unsigned max = 1;
+	auto Type = V->getType();
+	while(auto PtrType = dyn_cast<PointerType>(Type)) {
+		max++;
+		Type = PtrType->getPointerElementType();
+	}
+	return max; 
+  }
+
 public:
   using const_value_iterator = ValueMap::const_iterator;
   
-  void matchLevels(Node From, Node To) {
-	unsigned FromLevels = ValueImpls[From.Val].getNumLevels();
-	unsigned ToLevels = ValueImpls[To.Val].getNumLevels();
-	for (unsigned i = 1; i < FromLevels - From.DerefLevel; i++){
-		if(ToLevels <= To.DerefLevel + i) {
-			auto newNode = InstantiatedValue{To.Val, To.DerefLevel + i};
-			errs() << "create new node " << newNode << " to match " << InstantiatedValue{From.Val, From.DerefLevel+i} << "\n";
-			addNode(newNode);
-		}
-	}
 
+  void addLevels(Node From, Node To) {
+		
+	auto FromItr = ValueImpls.find(From.Val);
+	auto ToItr = ValueImpls.find(To.Val);
+	assert(FromItr != ValueImpls.end() && ToItr != ValueImpls.end());
+
+	unsigned FromLevels = FromItr->second.getNumLevels();
+	unsigned ToLevels = ToItr->second.getNumLevels();
+	unsigned ToMaxLevels = maxDerefLevel(To.Val);
+	unsigned FromMaxLevels = maxDerefLevel(From.Val);
+	
+	// if not limited by max level, 
+	// deref levels may grow infinitely due to getelementptr and bitcast
+	if (FromLevels <= From.DerefLevel + 1
+		  && From.DerefLevel + 1 < FromMaxLevels) {
+		addNode(Node{From.Val, From.DerefLevel + 1 }); 
+	}	
+
+	if (ToLevels <= To.DerefLevel + 1 
+		  && To.DerefLevel + 1 < ToMaxLevels) { 
+		addNode(Node{To.Val, To.DerefLevel + 1 }); 
+	}
   }
 
-  bool addNode(Node N, AliasAttrs Attr = AliasAttrs(), bool Taint = false)  {
+  bool addNode(Node N, AliasAttrs Attr = AliasAttrs())  {
     assert(N.Val != nullptr);
-   
     auto &ValInfo = ValueImpls[N.Val];
     auto Changed = ValInfo.addNodeToLevel(N.DerefLevel);
     auto &NodeInfo = ValInfo.getNodeInfoAtLevel(N.DerefLevel);
     NodeInfo.Attr |= Attr;    
-    NodeInfo.Tainted |= Taint;
-    if (Changed && !NodeInfo.Tainted)
-        NodeInfo.Tainted |= TaintPredicate(N); 
-        //avoid repreatedly calling TaintPredicate
 
     return Changed;
   }
@@ -217,6 +220,7 @@ template <typename CFLAA> class CFLGraphBuilder {
   // Output of the builder
   CFLGraph Graph;
   SmallVector<Value *, 4> ReturnedValues;
+  SmallVector<InstantiatedValue, 8> TaintSources;
 
   // Helper class
   /// Gets the edges our graph should have, based on an Instruction*
@@ -227,6 +231,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
     CFLGraph &Graph;
     SmallVectorImpl<Value *> &ReturnValues;
+	SmallVectorImpl<InstantiatedValue> &TaintSources;
 
     static bool hasUsefulEdges(ConstantExpr *CE) {
       // ConstantExpr doesn't have terminators, invokes, or fences, so only
@@ -304,7 +309,7 @@ template <typename CFLAA> class CFLGraphBuilder {
   public:
     GetEdgesVisitor(CFLGraphBuilder &Builder, const DataLayout &DL)
         : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), Graph(Builder.Graph),
-          ReturnValues(Builder.ReturnedValues) {}
+          ReturnValues(Builder.ReturnedValues), TaintSources(Builder.TaintSources) {}
 
     void visitInstruction(Instruction &) {
       llvm_unreachable("Unsupported instruction encountered");
@@ -460,8 +465,9 @@ template <typename CFLAA> class CFLGraphBuilder {
         for (auto &Tainted : TaintSummary) {
           auto IVal = instantiateInterfaceValue(Tainted, CS);
           if (IVal) {
-            Graph.addNode(*IVal, AliasAttrs(), true);
-			errs() << "add taint to node " << *IVal << "\n";
+            Graph.addNode(*IVal);
+			TaintSources.push_back(*IVal);
+            errs() << "add as taint source " << *IVal << "\n";
 		  }
         }
       }
@@ -473,9 +479,11 @@ template <typename CFLAA> class CFLGraphBuilder {
       auto Inst = CS.getInstruction();
 
       // Make sure all arguments and return value are added to the graph first
-      for (Value *V : CS.args())
-        if (V->getType()->isPointerTy())
-          addNode(V);
+      for (Value *V : CS.args()) {
+        if (V->getType()->isPointerTy()) {
+          addNode(V, getAttrActualArg());
+		}
+	  }
       if (Inst->getType()->isPointerTy())
         addNode(Inst);
 
@@ -667,6 +675,17 @@ template <typename CFLAA> class CFLGraphBuilder {
     }
   }
 
+ bool TaintPredicate(Value *V) {
+
+	//no deifnitive initializer means it couold be defined in another translation unit
+	 if (auto GV = dyn_cast<GlobalVariable>(V)) {
+		if (!GV->hasDefinitiveInitializer())
+			return true;
+	 }
+
+	 return isAllocationFn(V, &TLI); 
+  }
+
   // Given an Instruction, this will add it to the graph, along with any
   // Instructions that are potentially only available from said Instruction
   // For example, given the following line:
@@ -676,6 +695,14 @@ template <typename CFLAA> class CFLGraphBuilder {
   void addInstructionToGraph(GetEdgesVisitor &Visitor, Instruction &Inst) {
     if (!hasUsefulEdges(&Inst))
       return;
+
+	if(auto V = dyn_cast<Value>(&Inst)) {
+		if (TaintPredicate(V)) {
+			auto IV = InstantiatedValue{V, 0};
+			TaintSources.push_back(IV);
+            errs() << "add as taint source " << IV << "\n";
+		}
+	}
 
     Visitor.visit(Inst);
   }
@@ -702,6 +729,10 @@ public:
   CFLGraph &getCFLGraph() { return Graph; }
   const SmallVector<Value *, 4> &getReturnValues() const {
     return ReturnedValues;
+  }
+
+  const SmallVector<InstantiatedValue, 8> &getTaintSources() const {
+    return TaintSources;
   }
 };
 

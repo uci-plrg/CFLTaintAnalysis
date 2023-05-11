@@ -15,6 +15,7 @@
 #ifndef LLVM_ANALYSIS_CFLANDERSTAINTANALYSIS_H
 #define LLVM_ANALYSIS_CFLANDERSTAINTANALYSIS_H
 
+#include "AliasAnalysisSummary.h"
 #include "CFLTaintAnalysisUtils.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -31,13 +32,7 @@ class Function;
 class MemoryLocation;
 class TargetLibraryInfo;
 
-namespace cflta {
-
-struct InstantiatedValue;
- 
-struct AliasTaintSummary;
-
-}
+using TaintedSet = DenseSet<cflta::InstantiatedValue>; 
 
 class CFLAndersTaintResult : public AAResultBase<CFLAndersTaintResult> {
   friend AAResultBase<CFLAndersTaintResult>;
@@ -71,6 +66,7 @@ public:
 
   const Optional<std::vector<const Value *>> allTaintedValues(const Function&);
 
+
 private:
   /// Ensures that the given function is available in the cache.
   /// Returns the appropriate entry from the cache.
@@ -90,10 +86,15 @@ private:
   /// that simply has empty sets.
   DenseMap<const Function *, Optional<FunctionInfo>> Cache;
 
-  //TODO: save All globals tainted in some function in a set
-  //DenseSet<cflta::InstantiatedValue> TaintedGlobals;
+  //Save all globals tainted
+  TaintedSet TaintedGlobalVars;
 
-  //to propagate taint to other functions where the globals is used  
+  //Save for each function all formal arguments tainted
+  DenseMap<const Function *, TaintedSet> TaintedFormalArgs;
+
+  void propagateInterprocedural(FunctionInfo&); 
+  
+//to propagate taint to other functions where the globals is used  
   std::forward_list<cflta::FunctionHandle<CFLAndersTaintResult>> Handles;
 };
 
