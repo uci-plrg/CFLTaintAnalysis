@@ -481,7 +481,7 @@ template <typename CFLAA> class CFLGraphBuilder {
       // Make sure all arguments and return value are added to the graph first
       for (Value *V : CS.args()) {
         if (V->getType()->isPointerTy()) {
-          addNode(V, getAttrActualArg());
+          addNode(V);
 		}
 	  }
       if (Inst->getType()->isPointerTy())
@@ -498,9 +498,10 @@ template <typename CFLAA> class CFLGraphBuilder {
       // TODO: Add support for noalias args/all the other fun function
       // attributes that we can tack on.
       SmallVector<Function *, 4> Targets;
-      if (getPossibleTargets(CS, Targets))
+      if (getPossibleTargets(CS, Targets)) {
         if (tryInterproceduralAnalysis(CS, Targets))
           return;
+	  }
 
       // Because the function is opaque, we need to note that anything
       // could have happened to the arguments (unless the function is marked

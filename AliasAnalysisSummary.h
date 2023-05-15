@@ -81,11 +81,6 @@ bool hasUnknownOrCallerAttr(AliasAttrs);
 AliasAttrs getAttrEscaped();
 bool hasEscapedAttr(AliasAttrs);
 
-/// AttrActualArg represent whetehr the said pointer is an actual argument to a
-/// call instruction
-AliasAttrs getAttrActualArg();
-bool hasActualArgAttr(AliasAttrs);
-
 /// AttrGlobal represent whether the said pointer is a global value.
 /// AttrArg represent whether the said pointer is an argument, and if so, what
 /// index the argument has.

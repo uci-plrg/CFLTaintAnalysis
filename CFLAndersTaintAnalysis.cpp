@@ -381,6 +381,8 @@ class CFLAndersTaintResult::FunctionInfo {
   // The set of taint sources inside the function
   TaintedSet TaintSources;
 
+  SmallVector<Value *, 4> ReturnedValues;
+
   /// Map a value to other values that may alias it
   /// Since the alias relation is symmetric, to save some space we assume values
   /// are properly ordered: if a and b alias each other, and a < b, then b is in
@@ -401,7 +403,7 @@ class CFLAndersTaintResult::FunctionInfo {
   Optional<AliasAttrs> getAttrs(const Value *) const;
 
 public:
-  FunctionInfo(const Function &, const SmallVectorImpl<Value *> &,
+  FunctionInfo(const Function &, const SmallVector<Value *, 4> &,
                const ReachabilitySet &, const AliasAttrMap &, 
                const TaintedSet &);
   void propagateTaintSources(const TaintedSet&, TaintedSet *NewTaint); 
@@ -412,7 +414,9 @@ public:
   const TaintedSet &getTaintedVals() const { return TaintedVals; }
   const DenseMap<const Value *, AliasAttrs> &getAttrMap() const { return AttrMap; }
   const AliasTaintSummary &getSummary() const { return Summary; }
-  
+  const SmallVector<Value *, 4> &getReturnedValues() const { return ReturnedValues; }
+  const ReachabilitySet &getRevReachSet() const { return RevReachSet; }
+ 
 };
 
 static Optional<InterfaceValue>
@@ -584,23 +588,25 @@ static void populateTaintSummary(
 void CFLAndersTaintResult::FunctionInfo::propagateTaintSources(const TaintedSet &TaintSources, TaintedSet *NewTaint = nullptr) {
 	for(auto &Source: TaintSources) {
 		TaintedVals.insert(Source);
+		if(NewTaint)
+			NewTaint->insert(Source);
 		errs() << "taint source " << Source << "\n";
+
 		for(auto &Mapping: RevReachSet.reachableValueAliases(Source)) {
 			if(hasNonReadState(Mapping.second)) {
 				errs() << "nonread alias of taint source " << Mapping.first << "\n";
 				TaintedVals.insert(Mapping.first);				
-				if(NewTaint) {
+				if(NewTaint)
 					NewTaint->insert(Mapping.first);
-				}
 			}
 		}
 	}
 }
 
 CFLAndersTaintResult::FunctionInfo::FunctionInfo(
-    const Function &Fn, const SmallVectorImpl<Value *> &RetVals,
+    const Function &Fn, const SmallVector<Value *, 4> &RetVals,
     const ReachabilitySet &ReachSet, const AliasAttrMap &AMap,
-    const TaintedSet &TaintSources): TaintSources(TaintSources), RevReachSet(ReachSet.getRevReachSet()) {
+    const TaintedSet &TaintSources): TaintSources(TaintSources), ReturnedValues(RetVals), RevReachSet(ReachSet.getRevReachSet()){
   populateAttrMap(AttrMap, AMap);
   populateExternalAttributes(Summary.First.RetParamAttributes, Fn, RetVals, AMap);
   populateAliasMap(AliasMap, ReachSet);
@@ -616,47 +622,72 @@ void CFLAndersTaintResult::propagateInterprocedural(FunctionInfo& FuncInfo) {
 	while(!NewTaint.empty()) {
 		DenseMap<const Function *, TaintedSet> WorkMap;
 		for (const auto &Tainted : NewTaint) {
-			if(isa<GlobalVariable>(Tainted.Val)) {
-				if(TaintedGlobalVars.insert(Tainted).second) {
-					for(const auto &Use : Tainted.Val->uses()) {
-						if(auto Inst = dyn_cast<Instruction>(Use.getUser())) {
-							if (WorkMap[Inst->getFunction()].insert(Tainted).second)
-								errs() << "propagate global taint " << Tainted << " to function " << Inst->getFunction()->getName() << "\n";
-						}
+			if(isa<GlobalVariable>(Tainted.Val) 
+				&& TaintedGlobalVars.insert(Tainted).second) {
+				for(const auto &Use : Tainted.Val->uses()) {
+					if(auto Inst = dyn_cast<Instruction>(Use.getUser())) {
+						if (WorkMap[Inst->getFunction()].insert(Tainted).second)
+							errs() << "propagate global taint to " << Tainted << " ub function " << Inst->getFunction()->getName() << "\n";
 					}
 				}
 			}
 
+			// TODO: If the call is indirect, we might be need to enumerate all
+			// potential callees
+
 			auto Itr = AttrMap.find(Tainted.Val);
-			if (Itr != AttrMap.end() && hasActualArgAttr(Itr->second)) {
-				for(const auto &Use : Tainted.Val->uses()) {
-					if(const auto Call = dyn_cast<CallInst>(Use.getUser())) {
-						//arguments are the first operands in CallInst
-						unsigned ArgNum = Use.getOperandNo();
-						auto Callee = Call->getCalledFunction();
-						auto InstantiatedArg = InstantiatedValue{Callee->arg_begin() + ArgNum, Tainted.DerefLevel};
-						if(Callee && TaintedFormalArgs[Callee].insert(InstantiatedArg).second) {
-							//handle vararg by instantiating to the last argument
-							if(Callee->isVarArg() && ArgNum >= Callee->arg_size())
-								InstantiatedArg.Val = Callee->arg_end() - 1;
-							WorkMap[Callee].insert(InstantiatedArg);
-							errs() << "propagate formal argument taint " << InstantiatedArg << " to function " << Callee->getName() << "\n";
+			if(Itr != AttrMap.end() && hasGlobalAttr(Itr->second))
+				if(const auto Call = dyn_cast<CallInst>(Tainted.Val)) {
+					auto Callee = Call->getCalledFunction();
+					auto Itr = Cache.find(Callee); 
+					if (Itr != Cache.end()) {
+						auto &CalledFuncInfo = Itr->second ? *Itr->second : FuncInfo;
+						for (auto const ReturnVal : CalledFuncInfo.getReturnedValues()) {		
+							auto InstantiatedReturnVal = InstantiatedValue{ReturnVal, Tainted.DerefLevel};
+							if(isa<GlobalVariable>(ReturnVal) 
+								&& TaintedGlobalVars.insert(InstantiatedReturnVal).second) {
+									if(WorkMap[Callee].insert(InstantiatedReturnVal).second) 
+										errs() << "propagate global taint to " << Tainted << " through return value " << ReturnVal << " in function " << Callee << "\n"; 
+							}
+ 
+							for(auto &Mapping: CalledFuncInfo.getRevReachSet()
+								.reachableValueAliases(InstantiatedReturnVal)) {
+								auto Alias = Mapping.first;
+								if(isa<GlobalVariable>(Alias.Val) 
+									&& TaintedGlobalVars.insert(Alias).second) {
+									if(WorkMap[Callee].insert(Alias).second) 
+										errs() << "propagate global taint to " << Tainted << " through return value " << ReturnVal << " in function " << Callee << "\n"; 
+								} 
+							}
 						}
 					}
-
 				}
-			}	
-		}
+				
+		
+			for(const auto &Use : Tainted.Val->uses()) {
+				if(const auto Call = dyn_cast<CallInst>(Use.getUser())) {
+					//arguments are the first operands in CallInst
+					unsigned ArgNum = Use.getOperandNo();
+					auto Callee = Call->getCalledFunction();
+					auto InstantiatedArg = InstantiatedValue{Callee->arg_begin() + ArgNum, Tainted.DerefLevel};
+					if(Callee && TaintedFormalArgs[Callee].insert(InstantiatedArg).second) {
+						//handle vararg by instantiating to the last argument
+						if(Callee->isVarArg() && ArgNum >= Callee->arg_size())
+							InstantiatedArg.Val = Callee->arg_end() - 1;
+						if(WorkMap[Callee].insert(InstantiatedArg).second)
+							errs() << "propagate formal argument taint " << InstantiatedArg << " to function " << Callee->getName() << "\n";
+					}
+				}
+
+			}
+		}	
 
 		NewTaint = TaintedSet();
-		for (const auto &pair: WorkMap) {
-			auto Itr = Cache.find(pair.first); 
+		for (const auto &Pair: WorkMap) {
+			auto Itr = Cache.find(Pair.first); 
 			if(Itr != Cache.end()) {
-				auto &CachedFuncInfo = Itr->second;
-				if(CachedFuncInfo)
-					CachedFuncInfo->propagateTaintSources(pair.second, &NewTaint);
-				else //the current FuncInfo being processed
-					FuncInfo.propagateTaintSources(pair.second, &NewTaint);
+				auto &ToPropagate = Itr->second? *Itr->second : FuncInfo;
+				ToPropagate.propagateTaintSources(Pair.second, &NewTaint);
 			}
 		}
 	}
@@ -1043,6 +1074,7 @@ CFLAndersTaintResult::buildInfoFrom(const Function &Fn) {
 
   // Now that we have all the reachability info, propagate AliasAttrs according
   // to it
+  //TODO: add UnknownAttr and EscapedAttr to TaintSources
   auto IValueAttrMap = buildAttrMap(Graph, ReachSet);
 
   auto FuncInfo = FunctionInfo(Fn, GraphBuilder.getReturnValues(), ReachSet,

@@ -11,8 +11,7 @@ const unsigned AttrEscapedIndex = 0;
 const unsigned AttrUnknownIndex = 1;
 const unsigned AttrGlobalIndex = 2;
 const unsigned AttrCallerIndex = 3;
-const unsigned AttrActualArgIndex = 4;
-const unsigned AttrFirstArgIndex = 5;
+const unsigned AttrFirstArgIndex = 4;
 const unsigned AttrLastArgIndex = NumAliasAttrs;
 const unsigned AttrMaxNumArgs = AttrLastArgIndex - AttrFirstArgIndex;
 
@@ -24,7 +23,6 @@ const AliasAttr AttrEscaped = 1 << AttrEscapedIndex;
 const AliasAttr AttrUnknown = 1 << AttrUnknownIndex;
 const AliasAttr AttrGlobal = 1 << AttrGlobalIndex;
 const AliasAttr AttrCaller = 1 << AttrCallerIndex;
-const AliasAttr AttrActualArg = 1 << AttrActualArgIndex;
 const AliasAttr ExternalAttrMask = AttrEscaped | AttrUnknown | AttrGlobal;
 }
 
@@ -41,9 +39,6 @@ bool hasUnknownOrCallerAttr(AliasAttrs Attr) {
 
 AliasAttrs getAttrEscaped() { return AttrEscaped; }
 bool hasEscapedAttr(AliasAttrs Attr) { return Attr.test(AttrEscapedIndex); }
-
-AliasAttrs getAttrActualArg() { return AttrActualArg; }
-bool hasActualArgAttr(AliasAttrs Attr) { return Attr.test(AttrActualArgIndex); }
 
 static AliasAttr argNumberToAttr(unsigned ArgNum) {
   if (ArgNum >= AttrMaxNumArgs)
@@ -73,7 +68,7 @@ bool isGlobalOrArgAttr(AliasAttrs Attr) {
       .any();
 }
 
-bool hasGlobalAttr(AliasAttrs Attr) { return Attr.test(AttrGlobal); }
+bool hasGlobalAttr(AliasAttrs Attr) { return Attr.test(AttrGlobalIndex); }
 
 AliasAttrs getExternallyVisibleAttrs(AliasAttrs Attr) {
   return Attr & AliasAttrs(ExternalAttrMask);
