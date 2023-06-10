@@ -32,8 +32,8 @@
 ///
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_ANALYSIS_TAINTALIASANALYSISSUMMARY_H
-#define LLVM_ANALYSIS_TAINTALIASANALYSISSUMMARY_H
+#ifndef LLVM_ANALYSIS_TAINT_ALIASANALYSISSUMMARY_H
+#define LLVM_ANALYSIS_TAINT_ALIASANALYSISSUMMARY_H
 
 #include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/ADT/Optional.h"
@@ -87,6 +87,15 @@ bool hasEscapedAttr(AliasAttrs);
 AliasAttrs getGlobalOrArgAttrFromValue(const Value &);
 bool isGlobalOrArgAttr(AliasAttrs);
 bool hasGlobalAttr(AliasAttrs); 
+
+// AttrTainted indicates a tainted value
+// it does not propagate downwards
+AliasAttrs getAttrTainted();
+bool hasTaintedAttr(AliasAttrs Attr);
+AliasAttrs maskTaintedAttr(AliasAttrs Attr);
+ 
+// Possibly Tainted means either tainted, unknown, or escaped
+bool hasPossiblyTaintedAttr(AliasAttrs Attr); 
 
 /// Given an AliasAttrs, return a new AliasAttrs that only contains attributes
 /// meaningful to the caller. This function is primarily used for

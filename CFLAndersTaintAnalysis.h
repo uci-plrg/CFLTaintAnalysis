@@ -92,7 +92,7 @@ private:
   //Save for each function all formal arguments tainted
   DenseMap<const Function *, TaintedSet> TaintedFormalArgs;
 
-  void propagateInterprocedural(FunctionInfo&); 
+  void propagateInterprocedural(FunctionInfo &); 
   
 //to propagate taint to other functions where the globals is used  
   std::forward_list<cflta::FunctionHandle<CFLAndersTaintResult>> Handles;

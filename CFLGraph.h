@@ -1,4 +1,3 @@
-//===- CFLGraph.h - Abstract stratified sets implementation. -----*- C++-*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -13,12 +12,14 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_LIB_ANALYSIS_CFLGRAPH_H
-#define LLVM_LIB_ANALYSIS_CFLGRAPH_H
+#ifndef LLVM_LIB_ANALYSIS_TAINT_CFLGRAPH_H
+#define LLVM_LIB_ANALYSIS_TAINT_CFLGRAPH_H
 
 #include "AliasAnalysisSummary.h"
+#include "LibraryFunctions.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/iterator_range.h"
@@ -57,14 +58,14 @@ namespace cflta {
 /// Each Node in the graph is an InstantiatedValue, and each edge represent a
 /// pointer assignment between InstantiatedValue. Pointer
 /// references/dereferences are not explicitly stored in the graph: we
-/// implicitly assume that for each node (X, I) it has a dereference edge to (X,
+/// implicitly assume that for each //node (X, I) it has a dereference edge to (X,
 /// I+1) and a reference edge to (X, I-1).
 class CFLGraph {
 private:
   const TargetLibraryInfo TLI;
 
 public:
-  CFLGraph(const TargetLibraryInfo& TLI) : TLI(TLI) {}
+  CFLGraph(const TargetLibraryInfo& TLI) : TLI(TLI){}
 
   using Node = InstantiatedValue;
 
@@ -220,7 +221,6 @@ template <typename CFLAA> class CFLGraphBuilder {
   // Output of the builder
   CFLGraph Graph;
   SmallVector<Value *, 4> ReturnedValues;
-  SmallVector<InstantiatedValue, 8> TaintSources;
 
   // Helper class
   /// Gets the edges our graph should have, based on an Instruction*
@@ -231,7 +231,6 @@ template <typename CFLAA> class CFLGraphBuilder {
 
     CFLGraph &Graph;
     SmallVectorImpl<Value *> &ReturnValues;
-	SmallVectorImpl<InstantiatedValue> &TaintSources;
 
     static bool hasUsefulEdges(ConstantExpr *CE) {
       // ConstantExpr doesn't have terminators, invokes, or fences, so only
@@ -261,7 +260,8 @@ template <typename CFLAA> class CFLGraphBuilder {
       if (auto GVal = dyn_cast<GlobalValue>(Val)) {
         if (Graph.addNode(InstantiatedValue{GVal, 0},
                           getGlobalOrArgAttrFromValue(*GVal)))
-          Graph.addNode(InstantiatedValue{GVal, 1}, getAttrUnknown());
+          //Graph.addNode(InstantiatedValue{GVal, 1}, getAttrUnknown());
+		  Graph.addNode(InstantiatedValue{GVal, 1});
       } else if (auto CExpr = dyn_cast<ConstantExpr>(Val)) {
         if (hasUsefulEdges(CExpr)) {
           if (Graph.addNode(InstantiatedValue{CExpr, 0}))
@@ -309,7 +309,7 @@ template <typename CFLAA> class CFLGraphBuilder {
   public:
     GetEdgesVisitor(CFLGraphBuilder &Builder, const DataLayout &DL)
         : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), Graph(Builder.Graph),
-          ReturnValues(Builder.ReturnedValues), TaintSources(Builder.TaintSources) {}
+          ReturnValues(Builder.ReturnedValues) {}
 
     void visitInstruction(Instruction &) {
       llvm_unreachable("Unsupported instruction encountered");
@@ -465,15 +465,15 @@ template <typename CFLAA> class CFLGraphBuilder {
         for (auto &Tainted : TaintSummary) {
           auto IVal = instantiateInterfaceValue(Tainted, CS);
           if (IVal) {
-            Graph.addNode(*IVal);
-			TaintSources.push_back(*IVal);
-            errs() << "add as taint source " << *IVal << "\n";
+            Graph.addNode(*IVal, getAttrTainted());
+            //errs() << "add as taint source " << *IVal << "\n";
 		  }
         }
       }
 
       return true;
     }
+
 
     void visitCallSite(CallSite CS) {
       auto Inst = CS.getInstruction();
@@ -487,10 +487,13 @@ template <typename CFLAA> class CFLGraphBuilder {
       if (Inst->getType()->isPointerTy())
         addNode(Inst);
 
-      // Check if Inst is a call to a library function that
+	  if(handleLibraryFunction(Inst, &TLI))
+		return;
+      
+	  // Check if Inst is a call to a library function that
       // allocates/deallocates on the heap. Those kinds of functions do not
       // introduce any aliases.
-      // TODO: address other common library functions such as realloc(),
+	  // TODO: address other common library functions such as realloc(),
       // strdup(), etc.
       if (isMallocOrCallocLikeFn(Inst, &TLI) || isFreeCall(Inst, &TLI))
         return;
@@ -502,6 +505,8 @@ template <typename CFLAA> class CFLGraphBuilder {
         if (tryInterproceduralAnalysis(CS, Targets))
           return;
 	  }
+
+	  errs() << "unhandled call instruction  " << *Inst << "\n"; 
 
       // Because the function is opaque, we need to note that anything
       // could have happened to the arguments (unless the function is marked
@@ -700,8 +705,8 @@ template <typename CFLAA> class CFLGraphBuilder {
 	if(auto V = dyn_cast<Value>(&Inst)) {
 		if (TaintPredicate(V)) {
 			auto IV = InstantiatedValue{V, 0};
-			TaintSources.push_back(IV);
-            errs() << "add as taint source " << IV << "\n";
+			Graph.addNode(IV, getAttrTainted());
+            //errs() << "add as taint source " << IV << "\n";
 		}
 	}
 
@@ -730,10 +735,6 @@ public:
   CFLGraph &getCFLGraph() { return Graph; }
   const SmallVector<Value *, 4> &getReturnValues() const {
     return ReturnedValues;
-  }
-
-  const SmallVector<InstantiatedValue, 8> &getTaintSources() const {
-    return TaintSources;
   }
 };
 
