@@ -221,6 +221,7 @@ template <typename CFLAA> class CFLGraphBuilder {
   // Output of the builder
   CFLGraph Graph;
   SmallVector<Value *, 4> ReturnedValues;
+  SmallVector<Value *, 4> GlobalVars;
 
   // Helper class
   /// Gets the edges our graph should have, based on an Instruction*
@@ -231,6 +232,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
     CFLGraph &Graph;
     SmallVectorImpl<Value *> &ReturnValues;
+	SmallVector<Value *, 4> &GlobalVars;
 
     static bool hasUsefulEdges(ConstantExpr *CE) {
       // ConstantExpr doesn't have terminators, invokes, or fences, so only
@@ -308,8 +310,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
   public:
     GetEdgesVisitor(CFLGraphBuilder &Builder, const DataLayout &DL)
-        : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), Graph(Builder.Graph),
-          ReturnValues(Builder.ReturnedValues) {}
+        : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), Graph(Builder.Graph),ReturnValues(Builder.ReturnedValues), GlobalVars(Builder.GlobalVars) {}
 
     void visitInstruction(Instruction &) {
       llvm_unreachable("Unsupported instruction encountered");
@@ -435,8 +436,10 @@ template <typename CFLAA> class CFLGraphBuilder {
           return false;
         // Fail if the caller does not provide enough arguments
         assert(Fn->arg_size() <= CS.arg_size());
-        if (!AA.getSummary(*Fn))
+        if (!AA.getSummary(*Fn)) {
+	      errs() << "possible recursive call to " << Fn->getName() << "\n";
           return false;
+		}
       }
 
       for (auto *Fn : Fns) {
@@ -447,7 +450,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
         auto &RetParamRelations = AliasSummary.RetParamRelations;
         for (auto &Relation : RetParamRelations) {
-          auto IRelation = instantiateExternalRelation(Relation, CS);
+          auto IRelation = instantiateExternalRelation(Relation, CS, GlobalVars);
           if (IRelation.hasValue()) {
             Graph.addNode(IRelation->From);
             Graph.addNode(IRelation->To);
@@ -457,13 +460,13 @@ template <typename CFLAA> class CFLGraphBuilder {
 
         auto &RetParamAttributes = AliasSummary.RetParamAttributes;
         for (auto &Attribute : RetParamAttributes) {
-          auto IAttr = instantiateExternalAttribute(Attribute, CS);
+          auto IAttr = instantiateExternalAttribute(Attribute, CS, GlobalVars);
           if (IAttr.hasValue())
             Graph.addNode(IAttr->IValue, IAttr->Attr);
         }
         
         for (auto &Tainted : TaintSummary) {
-          auto IVal = instantiateInterfaceValue(Tainted, CS);
+          auto IVal = instantiateInterfaceValue(Tainted, CS, GlobalVars);
           if (IVal) {
             Graph.addNode(*IVal, getAttrTainted());
             //errs() << "add as taint source " << *IVal << "\n";
@@ -718,6 +721,9 @@ template <typename CFLAA> class CFLGraphBuilder {
   void buildGraphFrom(Function &Fn) {
     GetEdgesVisitor Visitor(*this, Fn.getParent()->getDataLayout());
 
+	for (auto &GVar: Fn.getParent()->getGlobalList())
+		GlobalVars.push_back(&GVar);
+    sort(GlobalVars);
     for (auto &Bb : Fn.getBasicBlockList())
       for (auto &Inst : Bb.getInstList())
         addInstructionToGraph(Visitor, Inst);
@@ -735,6 +741,10 @@ public:
   CFLGraph &getCFLGraph() { return Graph; }
   const SmallVector<Value *, 4> &getReturnValues() const {
     return ReturnedValues;
+  }
+
+  const SmallVector<Value *, 4> &getGlobalVars() const {
+    return GlobalVars;
   }
 };
 

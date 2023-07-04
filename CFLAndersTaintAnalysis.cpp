@@ -40,7 +40,7 @@
 // there's a third value Z that writes into both X and Y. To make that
 // distinction (which is crucial in building function summary as well as
 // retrieving mod-ref info), we choose to duplicate some of the states in the
-// paper's proposed state machine. The duplication does not change the set the
+// paper's proposed tate machine. The duplication does not change the set the
 // machine accepts. Given a pair of reachable values, it only provides more
 // detailed information on which value is being written into and which is being
 // read from.
@@ -67,15 +67,18 @@
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include <algorithm>
 #include <bitset>
 #include <cassert>
@@ -378,8 +381,6 @@ class CFLAndersTaintResult::FunctionInfo {
   // The set of tainted values
   TaintedSet TaintedVals;
 
-  SmallVector<Value *, 4> ReturnedValues;
-
   /// Map a value to other values that may alias it
   /// Since the alias relation is symmetric, to save some space we assume values
   /// are properly ordered: if a and b alias each other, and a < b, then b is in
@@ -401,8 +402,8 @@ class CFLAndersTaintResult::FunctionInfo {
 
 public:
   FunctionInfo(const Function &, const SmallVector<Value *, 4> &,
-               const ReachabilitySet &, const AliasAttrMap &, 
-               const TaintedSet &);
+			   const SmallVector<Value *, 4> &, const ReachabilitySet &, 
+			   const AliasAttrMap &, const TaintedSet &);
   void propagateTaintSources(const TaintedSet&, TaintedSet *NewTaint); 
   bool mayAlias(const Value *, LocationSize, const Value *, LocationSize) const;
 
@@ -411,7 +412,6 @@ public:
   const TaintedSet &getTaintedVals() const { return TaintedVals; }
   const DenseMap<const Value *, AliasAttrs> &getAttrMap() const { return AttrMap; }
   const AliasTaintSummary &getSummary() const { return Summary; }
-  const SmallVector<Value *, 4> &getReturnedValues() const { return ReturnedValues; }
   const ReachabilitySet &getRevReachSet() const { return RevReachSet; }
  
 };
@@ -419,6 +419,7 @@ public:
 static Optional<InterfaceValue>
 getInterfaceValue(InstantiatedValue IValue,
                   const SmallVectorImpl<Value *> &RetVals) {
+  //Globals are handled in getGlobalInterfaceValue
   auto Val = IValue.Val;
 
   Optional<unsigned> Index;
@@ -430,6 +431,24 @@ getInterfaceValue(InstantiatedValue IValue,
   if (Index)
     return InterfaceValue{*Index, IValue.DerefLevel};
   return None;
+}
+
+static Optional<InterfaceValue>
+getGlobalInterfaceValue(InstantiatedValue IValue,
+				  const Function &Fn,
+				  const SmallVectorImpl<Value *> &GlobalVars) {
+  auto Val = IValue.Val;
+  if(!isa<GlobalVariable>(Val))
+	return None;
+  auto ArgSize = Fn.arg_size();
+  Optional<unsigned> Index;
+  auto Pos = std::lower_bound(GlobalVars.begin(), GlobalVars.end(), Val);
+  if(Pos != GlobalVars.end())
+	Index = 1 + ArgSize + std::distance(GlobalVars.begin(), Pos);	
+  if (Index)
+    return InterfaceValue{*Index, IValue.DerefLevel};
+  return None;
+
 }
 
 static void populateAttrMap(DenseMap<const Value *, AliasAttrs> &AttrMap,
@@ -468,8 +487,7 @@ populateAliasMap(DenseMap<const Value *, std::vector<OffsetValue>> &AliasMap,
 
 static void populateExternalRelations(
     SmallVectorImpl<ExternalRelation> &ExtRelations, const Function &Fn,
-    const SmallVectorImpl<Value *> &RetVals, const ReachabilitySet &RevReachSet) {
-  //TODO: include global variables in external relations
+    const SmallVectorImpl<Value *> &RetVals, const SmallVectorImpl<Value *> &GlobalVars, const ReachabilitySet &RevReachSet) {
   // If a function only returns one of its argument X, then X will be both an
   // argument and a return value at the same time. This is an edge case that
   // needs special handling here.
@@ -481,6 +499,14 @@ static void populateExternalRelations(
     }
   }
 
+//the case where the function returns a global variable
+  for (auto &Val: RetVals){
+	auto IVal = InstantiatedValue{Val, 0};
+	if(auto GVar = getGlobalInterfaceValue(IVal, Fn, GlobalVars)) {
+	   auto RetVal = InterfaceValue{0, 0};
+	   ExtRelations.push_back(ExternalRelation{*GVar, RetVal, UnknownOffset});
+	}	
+  }
   // Below is the core summary construction logic.
   // A naive solution of adding only the value aliases that are parameters or
   // return values in ReachSet to the summary won't work: It is possible that a
@@ -494,6 +520,8 @@ static void populateExternalRelations(
   // write into it. If both the read list and the write list of a given value
   // are non-empty, we know that a particular value is an intermidate and we
   // need to add summary edges from the writes to the reads.
+
+
   DenseMap<Value *, ValueSummary> ValueMap;
   for (const auto &OuterMapping : RevReachSet.value_mappings()) {
     if (auto Src = getInterfaceValue(OuterMapping.first, RetVals)) {
@@ -514,6 +542,8 @@ static void populateExternalRelations(
             ExtRelations.push_back(ExternalRelation{*Dst, *Src, UnknownOffset});
 
         } else {
+		  //growing dereflevels of nodes downwards during propagation replaces this part
+
           // If Src is not a param/return, add it to ValueMap
           //auto SrcIVal = InnerMapping.first;
 		  //if (hasReadOnlyState(InnerMapping.second))
@@ -562,10 +592,16 @@ static void populateExternalRelations(
 
 static void populateExternalAttributes(
     SmallVectorImpl<ExternalAttribute> &ExtAttributes, const Function &Fn,
-    const SmallVectorImpl<Value *> &RetVals, const AliasAttrMap &AMap) {
+    const SmallVectorImpl<Value *> &RetVals, const SmallVectorImpl<Value *> &GlobalVars, const AliasAttrMap &AMap) {
   for (const auto &Mapping : AMap.mappings()) {
     if (auto IVal = getInterfaceValue(Mapping.first, RetVals)) {
       auto Attr = getExternallyVisibleAttrs(Mapping.second);
+      if (Attr.any())
+        ExtAttributes.push_back(ExternalAttribute{*IVal, Attr});
+    }	
+    
+	if(auto IVal = getGlobalInterfaceValue(Mapping.first, Fn, GlobalVars)) {
+	  auto Attr = getExternallyVisibleAttrs(Mapping.second);
       if (Attr.any())
         ExtAttributes.push_back(ExternalAttribute{*IVal, Attr});
     }
@@ -573,12 +609,17 @@ static void populateExternalAttributes(
 }
 
 static void populateTaintSummary(
-    SmallVectorImpl<InterfaceValue> &TaintSummary, const SmallVectorImpl<Value *> &RetVals, const TaintedSet &TSet) {
+    SmallVectorImpl<InterfaceValue> &TaintSummary, const Function &Fn, const SmallVectorImpl<Value *> &RetVals, const SmallVectorImpl<Value *> &GlobalVars, const TaintedSet &TSet) {
   for (const auto &Tainted : TSet) {
     if (auto IVal = getInterfaceValue(Tainted, RetVals)) {
 	  errs() << "add to taint summary : " << *IVal << "\n";
       TaintSummary.push_back(*IVal);
     }
+    if (auto IVal = getGlobalInterfaceValue(Tainted, Fn, RetVals)) {
+	  errs() << "add to taint summary : " << *IVal << "\n";
+      TaintSummary.push_back(*IVal);
+    }
+
   }
 }
 
@@ -601,32 +642,21 @@ void CFLAndersTaintResult::FunctionInfo::propagateTaintSources(const TaintedSet 
 }
 
 CFLAndersTaintResult::FunctionInfo::FunctionInfo(
-    const Function &Fn, const SmallVector<Value *, 4> &RetVals,
-    const ReachabilitySet &RevReachSet, const AliasAttrMap &AMap,
-    const TaintedSet &TaintedVals): TaintedVals(TaintedVals), ReturnedValues(RetVals), RevReachSet(RevReachSet){
+    const Function &Fn, const SmallVector<Value *, 4> &RetVals, 
+    const SmallVector<Value *, 4> &GlobalVars, const ReachabilitySet &RevReachSet, 
+    const AliasAttrMap &AMap, const TaintedSet &TaintedVals): TaintedVals(TaintedVals), RevReachSet(RevReachSet){
   populateAttrMap(AttrMap, AMap);
-  populateExternalAttributes(Summary.First.RetParamAttributes, Fn, RetVals, AMap);
+  populateExternalAttributes(Summary.First.RetParamAttributes, Fn, RetVals, GlobalVars, AMap);
   populateAliasMap(AliasMap, RevReachSet);
-  populateExternalRelations(Summary.First.RetParamRelations, Fn, RetVals, RevReachSet);
-  populateTaintSummary(Summary.Second, RetVals, TaintedVals);
+  populateExternalRelations(Summary.First.RetParamRelations, Fn, RetVals, GlobalVars, RevReachSet);
+  populateTaintSummary(Summary.Second, Fn, RetVals, GlobalVars, TaintedVals);
 }
 
 void CFLAndersTaintResult::propagateInterprocedural(FunctionInfo &FuncInfo) {
 	const auto &TaintedVals = FuncInfo.getTaintedVals();
-	const auto &AttrMap = FuncInfo.getAttrMap();
 	TaintedSet NewTaint = TaintedVals;
 
 	DenseMap<const Function *, TaintedSet> WorkMap;
-
-    auto PropagateGlobal = [&] (InstantiatedValue Tainted) {
-		for(const auto &Use : Tainted.Val->uses()) {
-			if(auto Inst = dyn_cast<Instruction>(Use.getUser())) {
-				auto Callee = Inst->getFunction();
-				if (Callee && WorkMap[Callee].insert(Tainted).second)
-					errs() << "propagate global taint to " << Tainted << " in function " << Callee->getName() << "\n";
-			}
-		}
-	};
 
 	while(!NewTaint.empty()) {
 		// TODO: If the call is indirect, we might be need to enumerate all
@@ -635,7 +665,7 @@ void CFLAndersTaintResult::propagateInterprocedural(FunctionInfo &FuncInfo) {
 		for (const auto &Tainted : NewTaint) {					
 			for(const auto &Use : Tainted.Val->uses()) {
 				if(const auto Call = dyn_cast<CallInst>(Use.getUser())) {
-					//arguments are the first operands in CallInst
+					//arguments are the operands at the beginning in a CallInst
 					unsigned ArgNum = Use.getOperandNo();
 					auto Callee = Call->getCalledFunction();
 					if(!Callee)
@@ -645,7 +675,7 @@ void CFLAndersTaintResult::propagateInterprocedural(FunctionInfo &FuncInfo) {
 						ArgNum = Callee->arg_size() - 1;
 					auto InstantiatedArg = InstantiatedValue{Callee->arg_begin() + ArgNum, Tainted.DerefLevel};
 					if(TaintedFormalArgs[Callee].insert(InstantiatedArg).second) {
-						if(WorkMap[Callee].insert(InstantiatedArg).second)
+						if(WorkMap[Callee].insert(InstantiatedArg).second){}
 							errs() << "propagate formal argument taint " << InstantiatedArg << " to function " << Callee->getName() << "\n";
 					}
 				}
@@ -653,33 +683,16 @@ void CFLAndersTaintResult::propagateInterprocedural(FunctionInfo &FuncInfo) {
 			}
 
 			if(isa<GlobalVariable>(Tainted.Val) 
-				&& TaintedGlobalVars.insert(Tainted).second)
-				PropagateGlobal(Tainted);				
-
-			auto Itr = AttrMap.find(Tainted.Val);
-			if(Itr != AttrMap.end() && hasGlobalAttr(Itr->second))
-				if(const auto Call = dyn_cast<CallInst>(Tainted.Val)) {
-					auto Callee = Call->getCalledFunction();
-					auto Itr = Cache.find(Callee); 
-					if (Itr != Cache.end()) {
-						auto &CalledFuncInfo = Itr->second ? *Itr->second : FuncInfo;
-						for (auto const ReturnVal : CalledFuncInfo.getReturnedValues()) {		
-							auto InstantiatedReturnVal = InstantiatedValue{ReturnVal, Tainted.DerefLevel};
-							if(isa<GlobalVariable>(ReturnVal) 
-								&& TaintedGlobalVars.insert(InstantiatedReturnVal).second)
-								PropagateGlobal(InstantiatedReturnVal);
- 
-							for(auto &Mapping: CalledFuncInfo.getRevReachSet()
-								.reachableValueAliases(InstantiatedReturnVal)) {
-								auto Alias = Mapping.first;
-								if(isa<GlobalVariable>(Alias.Val) 
-									&& TaintedGlobalVars.insert(Alias).second)
-									PropagateGlobal(Alias);
-							}
-						}
+				&& TaintedGlobalVars.insert(Tainted).second) {
+				for(const auto &Use : Tainted.Val->uses()) {
+					if(auto Inst = dyn_cast<Instruction>(Use.getUser())) {
+						auto Callee = Inst->getFunction();
+						if (Callee && WorkMap[Callee].insert(Tainted).second) {}
+							errs() << "propagate global taint to " << Tainted << " in function " << Callee->getName() << "\n";
 					}
 				}
-
+			}
+			
 		}	
 
 		NewTaint = TaintedSet();
@@ -1056,6 +1069,7 @@ static TaintedSet buildTaintedVals(const CFLGraph &Graph,
 			auto Node = InstantiatedValue{Val, I};
 			if(hasPossiblyTaintedAttr(AttrMap.getAttrs(Node))) {
 				TaintedVals.insert(Node);
+				errs() << "add to tainted values" << Node << "\n";
 			}
 		}
 	}
@@ -1093,7 +1107,7 @@ CFLAndersTaintResult::buildInfoFrom(const Function &Fn) {
   auto IValueAttrMap = buildAttrMap(Graph, RevReachSet);
   auto TaintedVals = buildTaintedVals(Graph, IValueAttrMap);
 
-  auto FuncInfo = FunctionInfo(Fn, GraphBuilder.getReturnValues(), RevReachSet,
+  auto FuncInfo = FunctionInfo(Fn, GraphBuilder.getReturnValues(), GraphBuilder.getGlobalVars(), RevReachSet,
                       std::move(IValueAttrMap), TaintedVals);
 
   FuncInfo.propagateTaintSources(TaintedGlobalVars);
@@ -1110,9 +1124,19 @@ void CFLAndersTaintResult::scan(const Function &Fn) {
 
   // Note that we can't do Cache[Fn] = buildSetsFrom(Fn) here: the function call
   // may get evaluated after operator[], potentially triggering a DenseMap
-  // resize and invalidating the reference returned by operator[]
+  // resize and invalidating the reference returned by operator[]  
+errs() << "------------------------------------------------------\n";
+  errs() << "building info for " << Fn.getName().str() << "\n\n";
+  errs() << Fn << "\n";
+
   auto FunInfo = buildInfoFrom(Fn);
   Cache[&Fn] = std::move(FunInfo);
+
+  errs() << "finished building info for " << Fn.getName().str() << "\n";
+  errs() << "------------------------------------------------------\n";
+
+
+
   Handles.emplace_front(const_cast<Function *>(&Fn), this);
 }
 
@@ -1207,7 +1231,7 @@ const Optional<std::vector<const Value *>> CFLAndersTaintResult::allValueAliases
     return None;
 }
 
-const Optional<std::vector<const Value *>> CFLAndersTaintResult::allTaintedValues(const Function &Fn) {
+const Optional<std::vector<const Value *>> CFLAndersTaintResult::taintedVals(const Function &Fn) {
 
   auto &FunInfo = ensureCached(Fn);
   if (FunInfo.hasValue()) {
@@ -1224,31 +1248,52 @@ const Optional<std::vector<const Value *>> CFLAndersTaintResult::allTaintedValue
     return None;
 }
 
+const DenseMap<const Function*, std::vector<const Value *>> CFLAndersTaintResult::taintedValsInReachableFuncs(const Function &Fn) {
+
+  auto &FuncInfo = ensureCached(Fn);
+  DenseMap<const Function*, std::vector<const Value *>> valMap;
+  if(!FuncInfo.hasValue())
+	return valMap; 
+  for (auto const &pair: Cache) {
+	auto FuncInfo = pair.second;
+	if (FuncInfo.hasValue()) {
+		auto TaintedSet = FuncInfo->getTaintedVals();
+		std::vector<const Value *> vals;
+		for(auto Itr = TaintedSet.begin(); Itr != TaintedSet.end(); Itr++)		  {
+			if(Itr->DerefLevel == 0) {
+				vals.push_back(Itr->Val);
+			}
+		}
+		valMap[pair.first] = vals;
+	}	
+  }
+    return valMap;
+}
 
 AnalysisKey CFLAndersAA::Key;
 
-CFLAndersTaintResult CFLAndersAA::run(Module &M, ModuleAnalysisManager &MM) {
-  return CFLAndersTaintResult(MM.getResult<TargetLibraryAnalysis>(M));
+CFLAndersTaintResult CFLAndersAA::run(Function &F, FunctionAnalysisManager &AM) {
+  return CFLAndersTaintResult(AM.getResult<TargetLibraryAnalysis>(F));
 }
 
 char CFLAndersTaintWrapperPass::ID = 0;
 static RegisterPass<CFLAndersTaintWrapperPass> X("cfl-anders-taint", "Inclusion-Based CFL Taint Analysis", false, true);
 
+
 //INITIALIZE_PASS(CFLAndersTaintWrapperPass, "cfl-anders-taint",
 //                "Inclusion-Based CFL Taint Analysis", false, true)
 
-ModulePass *llvm::createCFLAndersTaintWrapperPass() {
-  return new CFLAndersTaintWrapperPass();
-}
+//ModulePass *llvm::createCFLAndersTaintWrapperPass() {
+//  return new CFLAndersTaintWrapperPass();
+//}
 
-CFLAndersTaintWrapperPass::CFLAndersTaintWrapperPass() : ModulePass(ID) {
+CFLAndersTaintWrapperPass::CFLAndersTaintWrapperPass() : ImmutablePass(ID) {
   //initializeCFLAndersTaintWrapperPassPass(*PassRegistry::getPassRegistry());
 }
 
-bool CFLAndersTaintWrapperPass::runOnModule(Module &M) {
+void CFLAndersTaintWrapperPass::initializePass() {
   auto &TLIWP = getAnalysis<TargetLibraryInfoWrapperPass>();
   Result.reset(new CFLAndersTaintResult(TLIWP.getTLI()));
-  return false;
 }
 
 void CFLAndersTaintWrapperPass::getAnalysisUsage(AnalysisUsage &AU) const {

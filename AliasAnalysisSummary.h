@@ -224,7 +224,7 @@ struct InstantiatedValue {
   Value *Val;
   unsigned DerefLevel;
 };
-Optional<InstantiatedValue> instantiateInterfaceValue(InterfaceValue, CallSite);
+Optional<InstantiatedValue> instantiateInterfaceValue(InterfaceValue, CallSite, SmallVector<Value *, 4>);
 
 inline bool operator==(InstantiatedValue LHS, InstantiatedValue RHS) {
   return LHS.Val == RHS.Val && LHS.DerefLevel == RHS.DerefLevel;
@@ -255,8 +255,7 @@ struct InstantiatedRelation {
   InstantiatedValue From, To;
   int64_t Offset;
 };
-Optional<InstantiatedRelation> instantiateExternalRelation(ExternalRelation,
-                                                           CallSite);
+Optional<InstantiatedRelation> instantiateExternalRelation(ExternalRelation, CallSite, SmallVector<Value *, 4>);
 
 /// This is the result of instantiating ExternalAttribute at a particular
 /// callsite
@@ -265,7 +264,7 @@ struct InstantiatedAttr {
   AliasAttrs Attr;
 };
 Optional<InstantiatedAttr> instantiateExternalAttribute(ExternalAttribute,
-                                                        CallSite);
+CallSite, SmallVector<Value *, 4>);
 }
 
 template <> struct DenseMapInfo<cflta::InstantiatedValue> {

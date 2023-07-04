@@ -64,8 +64,9 @@ public:
 
   const Optional<std::vector<const Value *>> allValueAliases(const Value *);  
 
-  const Optional<std::vector<const Value *>> allTaintedValues(const Function&);
-
+  const Optional<std::vector<const Value *>> taintedVals(const Function&);
+  
+  const DenseMap<const Function*, std::vector<const Value *>> taintedValsInReachableFuncs(const Function &Fn); 
 
 private:
   /// Ensures that the given function is available in the cache.
@@ -110,11 +111,11 @@ class CFLAndersAA : public AnalysisInfoMixin<CFLAndersAA> {
 public:
   using Result = CFLAndersTaintResult;
 
-  CFLAndersTaintResult run(Module &M, ModuleAnalysisManager &MM);
+  CFLAndersTaintResult run(Function &F, FunctionAnalysisManager &AM);
 };
 
 /// Legacy wrapper pass to provide the CFLAndersTaintResult object.
-class CFLAndersTaintWrapperPass : public ModulePass {
+class CFLAndersTaintWrapperPass : public ImmutablePass {
   std::unique_ptr<CFLAndersTaintResult> Result;
   
   bool (*taintPredicate) (Value*);
@@ -124,9 +125,9 @@ public:
   CFLAndersTaintWrapperPass(); 
   CFLAndersTaintResult &getResult() { return *Result; }
   const CFLAndersTaintResult &getResult() const { return *Result; }
-
-  bool runOnModule(Module &M) override;
-  //void initializePass() override;
+ 
+  //bool runOnModule(Module &M);
+  void initializePass() override;
   void getAnalysisUsage(AnalysisUsage &AU) const override;
 };
 
