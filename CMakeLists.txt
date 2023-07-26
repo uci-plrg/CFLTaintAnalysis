@@ -5,6 +5,7 @@ endif()
 add_llvm_library(libCFLTaintAnalysis MODULE BUILDTREE_ONLY
   CFLAndersTaintAnalysis.cpp
   AliasAnalysisSummary.cpp
+  CFLGraph.cpp
 
   DEPENDS
   intrinsics_gen

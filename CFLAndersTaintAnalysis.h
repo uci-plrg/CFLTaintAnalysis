@@ -57,7 +57,7 @@ public:
   
   /// Get the summary for the given function
   /// Return nullptr if the summary is not found or not available
-  const cflta::AliasTaintSummary *getSummary(const Function &);
+  const cflta::AliasSummary *getSummary(const Function &);
 
   AliasResult query(const MemoryLocation &, const MemoryLocation &);
   AliasResult alias(const MemoryLocation &, const MemoryLocation &);
@@ -86,6 +86,9 @@ private:
   /// have any kind of recursion, it is discernable from a function
   /// that simply has empty sets.
   DenseMap<const Function *, Optional<FunctionInfo>> Cache;
+
+  //Global variables in the module;
+  Optional<SmallVector<Value *, 4>> GlobalVars;
 
   //Save all globals tainted
   TaintedSet TaintedGlobalVars;
@@ -118,7 +121,6 @@ public:
 class CFLAndersTaintWrapperPass : public ImmutablePass {
   std::unique_ptr<CFLAndersTaintResult> Result;
   
-  bool (*taintPredicate) (Value*);
 public:
   static char ID;
 

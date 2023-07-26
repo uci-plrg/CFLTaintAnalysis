@@ -1,4 +1,4 @@
-//=- CFLAliasAnalysisUtils.h - Utilities for CFL Alias Analysis ----*- C++-*-=//
+//=- CFLTaintAnalysisUtils.h - Utilities for CFL Alias Analysis ----*- C++-*-=//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -7,15 +7,14 @@
 //
 //===----------------------------------------------------------------------===//
 // \file
-// These are the utilities/helpers used by the CFL Alias Analyses available in
-// tree, i.e. Steensgaard's and Andersens'.
-//
+// These are the utilities/helpers used by the CFL Taint Analyses
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_ANALYSIS_CFLTAINTANALYSISUTILS_H
 #define LLVM_ANALYSIS_CFLTAINTANALYSISUTILS_H
 
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/ValueHandle.h"
 
 namespace llvm {
@@ -51,7 +50,26 @@ static inline const Function *parentFunctionOfValue(const Value *Val) {
   if (auto *Arg = dyn_cast<Argument>(Val))
     return Arg->getParent();
   return nullptr;
-} 
+}
+ 
+static inline unsigned maxDerefLevel(const Value* V) {
+ unsigned max = 0;
+ auto Type = V->getType();
+ assert(Type->isPointerTy());
+ Type = cast<PointerType>(Type)->getPointerElementType();
+ while(auto PtrType = dyn_cast<PointerType>(Type)) {
+ 	max++;
+ 	Type = PtrType->getPointerElementType();
+ }
+ return max; 
+}
+
+static inline bool isValueImmutable(const Value *V) {
+	if(auto GV = dyn_cast<GlobalVariable>(V))
+		return GV->isConstant();
+    return isa<Constant>(V);
+}
+
 } // namespace llvm
 }
 

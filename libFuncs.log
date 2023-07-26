@@ -1,3 +1,58 @@
+Memcpy: 
+
+case LibFunc_memcpy_chk:
+case LibFunc_memmove_chk:
+case LibFunc_memccpy:
+case LibFunc_memcpy:
+case LibFunc_memmove:
+case LibFunc_mempcpy:
+
+Unknown:
+
+case LibFunc_nvvm_reflect:
+
+Ret0Alias:
+	
+case LibFunc_strstr:
+case LibFunc_strrchr:
+case LibFunc_strpbrk:
+case LibFunc_strncpy:
+case LibFunc_strncat:
+case LibFunc_strcpy:
+case LibFunc_strchr:
+case LibFunc_strcat:
+case LibFunc_memrchr:
+case LibFunc_memchr:
+case LibFunc_strcpy_chk:
+case LibFunc_strncpy_chk:
+case LibFunc_fgets:
+case LibFunc_gets:
+case LibFunc_fgets_unlocked:
+case LibFunc_stpcpy:
+case LibFunc_stpncpy:
+case LibFunc_stpcpy_chk:
+case LibFunc_stpncpy_chk:
+
+Realloc:
+
+case LibFunc_strtok_r:
+case LibFunc_strtok:
+case LibFunc_dunder_strtok_r:
+case LibFunc_realloc:
+case LibFunc_reallocf:
+
+Conversion:
+
+case LibFunc_strtod:
+case LibFunc_strtof:
+case LibFunc_strtol:
+case LibFunc_strtold:
+case LibFunc_strtoll:
+case LibFunc_strtoul:
+case LibFunc_strtoull:
+
+All:
+
 case LibFunc_msvc_new_int:
 case LibFunc_msvc_new_int_nothrow:
 case LibFunc_msvc_new_longlong:

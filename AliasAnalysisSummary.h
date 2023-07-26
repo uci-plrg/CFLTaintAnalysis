@@ -211,14 +211,6 @@ struct AliasSummary {
   SmallVector<ExternalAttribute, 8> RetParamAttributes;
 };
 
-//TaintSummary is a collection of tainted InterfaceValues
-using TaintSummary = SmallVector<InterfaceValue, 4>;
-
-struct AliasTaintSummary {
-    AliasSummary First;
-    TaintSummary Second;
-};
-
 /// This is the result of instantiating InterfaceValue at a particular callsite
 struct InstantiatedValue {
   Value *Val;

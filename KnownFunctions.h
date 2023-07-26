@@ -1,10 +1,14 @@
 //// this file contains models of c and c++ library functions
 //// modified from https://github.com/grievejia/andersen/blob/master/lib/ExternalLibrary.cpp
 
-#ifndef LLVM_LIB_ANALYSIS_TAINT_LIBRARY_FUNCTION_H
-#define LLVM_LIB_ANALYSIS_TAINT_LIBRARY_FUNCTION_H
+#ifndef LLVM_LIB_ANALYSIS_TAINT_KNOWN_FUNCTIONS_H
+#define LLVM_LIB_ANALYSIS_TAINT_KNOWN_FUNCTIONS_H
 
+#include "CFLGraph.h"
+#include "CFLTaintAnalysisUtils.h"
+#include "KnownFunctionsConfig.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Analysis/MemoryBuiltins.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
@@ -12,35 +16,25 @@
 
 #include <algorithm>
 
+//#define ALL_ALLOC_FN_PMEM 1
+
 using namespace llvm;
+using namespace llvm::cflta;
 
 
-static const Function *getCalledFunction(const Value *V, bool LookThroughBitCast,
-                                         bool &IsNoBuiltin) {
-  // Don't care about intrinsics in this case.
-  if (isa<IntrinsicInst>(V))
-    return nullptr;
+//intrinsics that have no effect on aliasing
+bool isNoAliasIntrinsic(const IntrinsicInst *II) {
+    if(isa<ConstrainedFPIntrinsic>(II) || 
+       isa<AnyMemSetInst>(II) ||
+       isa<VAStartInst>(II) ||
+       isa<VAEndInst>(II) ||
+       isa<InstrProfIncrementInst>(II) ||
+       isa<InstrProfValueProfileInst>(II))
+	  return true;
 
-  if (LookThroughBitCast)
-    V = V->stripPointerCasts();
-
-  ImmutableCallSite CS(V);
-  if (!CS.getInstruction())
-    return nullptr;
-
-  IsNoBuiltin = CS.isNoBuiltin();
-
-  if (const Function *Callee = CS.getCalledFunction())
-    return Callee;
-  return nullptr;
-}
-
-//assume like intrinsics are annotations and have no effect on aliasing
-static bool isAssumeLikeIntrinsic(const Instruction *I) {
-  if (const CallInst *CI = dyn_cast<CallInst>(I))
-    if (Function *F = CI->getCalledFunction())
-      switch (F->getIntrinsicID()) {
+	switch (II->getIntrinsicID()) {
       default: break;
+      //assume like intrinsics
       case Intrinsic::assume:
       case Intrinsic::sideeffect:
       case Intrinsic::dbg_declare:
@@ -53,24 +47,83 @@ static bool isAssumeLikeIntrinsic(const Instruction *I) {
       case Intrinsic::objectsize:
       case Intrinsic::ptr_annotation:
       case Intrinsic::var_annotation:
+      //BinaryOpIntrinsics
+      case Intrinsic::uadd_with_overflow:
+      case Intrinsic::sadd_with_overflow:
+      case Intrinsic::usub_with_overflow:
+      case Intrinsic::ssub_with_overflow:
+      case Intrinsic::umul_with_overflow:
+      case Intrinsic::smul_with_overflow:
+      case Intrinsic::uadd_sat:
+      case Intrinsic::sadd_sat:
+      case Intrinsic::usub_sat:
+      case Intrinsic::ssub_sat:
+	  //unclassified
+	  case Intrinsic::bswap:
         return true;
-      }
+    }
 
   return false;
 }
 
-bool handleLibraryFunction(const Instruction *I, const TargetLibraryInfo *TLI) {
+bool handleKnownFunctions(const CallSite CS, const TargetLibraryInfo *TLI, CFLGraph &Graph) {
+  auto I = CS.getInstruction();
+  auto IV = InstantiatedValue{cast<CallBase>(I),  0};
 
-  if(isAssumeLikeIntrinsic(I))
+  if(auto II = dyn_cast<IntrinsicInst>(I)) {
+	if(isNoAliasIntrinsic(II))
+	  return true;
+    else if(auto MT = dyn_cast<AnyMemTransferInst>(II)) {
+		Graph.addEdge(InstantiatedValue{MT->getSource(), 0}, InstantiatedValue{MT->getDest(), 0});
+        return true;   
+    }
+    else if(auto VI = dyn_cast<VACopyInst>(II)) {
+		Graph.addEdge(InstantiatedValue{VI->getSrc(), 0}, InstantiatedValue{VI->getDest(), 0});
+        return true;   
+    }
+    else if(auto VI = dyn_cast<VAArgInst>(II)) {
+		auto VAArgList = VI->getPointerOperand();
+		Graph.addNode(InstantiatedValue{VAArgList, 1});
+		Graph.addEdge(InstantiatedValue{VAArgList, 1}, InstantiatedValue{VI, 0});
+        return true;   
+    }
+
+  }
+	
+  if (isAllocationFn(I, TLI)) {
+#ifdef ALL_ALLOC_FN_PMEM
+	Graph.addAttr(IV, getAttrTainted());
+#endif
 	return true;
+  }
 
-  bool IsNoBuiltinCall;
-  const Function *Callee =
-      getCalledFunction(I, /*LookThroughBitCast=*/false, IsNoBuiltinCall);
-  if (Callee == nullptr || IsNoBuiltinCall)
+  if (isFreeCall(I, TLI))
+    return true;
+
+  const Function *Callee = CS.getCalledFunction();
+  if (Callee == nullptr)
     return false;
 
-  StringRef FnName = Callee->getName();
+  std::string FnName = Callee->getName().str();
+
+  if(is_contained(PMAllocators, FnName)) {
+	Graph.addAttr(IV, getAttrTainted());
+	return true;
+  }
+  if(is_contained(PMAllocatorsArg7Lv1, FnName)) {
+	auto Arg = CS.getArgOperand(7);
+	Graph.addNode(InstantiatedValue{Arg, 1}, getAttrTainted());
+    return true;
+  }
+  if(is_contained(noAliasFunctions, FnName))
+	return true;
+	
+  //TODO: Should non-built-in calls be treated differently?
+  if(auto CB = dyn_cast<CallBase>(CS.getInstruction())) {
+	if(CB->isNoBuiltin())
+	  return false;
+  }
+
   LibFunc TLIFn;
   if (!TLI || !TLI->getLibFunc(FnName, TLIFn) || !TLI->has(TLIFn))
     return false;
@@ -171,6 +224,7 @@ bool handleLibraryFunction(const Instruction *I, const TargetLibraryInfo *TLI) {
 	case LibFunc_cabs:
 	case LibFunc_cabsf:
 	case LibFunc_cabsl:
+	case LibFunc_calloc:
 	case LibFunc_cbrt:
 	case LibFunc_cbrtf:
 	case LibFunc_cbrtl:
@@ -417,10 +471,87 @@ bool handleLibraryFunction(const Instruction *I, const TargetLibraryInfo *TLI) {
 	case LibFunc_wcslen:
 	case LibFunc_write:
 		return true;
-	//TODO: handle special cases
+	//return value aliases with first arg
+    case LibFunc_strstr:
+	case LibFunc_strrchr:
+	case LibFunc_strpbrk:
+	case LibFunc_strncpy:
+	case LibFunc_strncat:
+	case LibFunc_strcpy:
+	case LibFunc_strchr:
+	case LibFunc_strcat:
+	case LibFunc_memrchr:
+	case LibFunc_memchr:
+	case LibFunc_strcpy_chk:
+	case LibFunc_strncpy_chk:
+	case LibFunc_fgets:
+	case LibFunc_gets:
+	case LibFunc_fgets_unlocked:
+	case LibFunc_stpcpy:
+	case LibFunc_stpncpy:
+	case LibFunc_stpcpy_chk:
+	case LibFunc_stpncpy_chk: {
+		auto arg0 = CS.getArgument(0);
+        Graph.addEdge(InstantiatedValue{arg0, 0}, InstantiatedValue{I, 0});
+		return true;
+    }
+	//unknown if the arg is NULL, else return value aliases with first arg
+	case LibFunc_strtok_r:
+	case LibFunc_strtok:
+	case LibFunc_dunder_strtok_r: {
+		auto arg0 = CS.getArgument(0);
+		if(isa<ConstantPointerNull>(arg0))
+			return false;
+		Graph.addEdge(InstantiatedValue{arg0, 0}, InstantiatedValue{I, 0});
+		return true;
+	}
+    //pointee of return value aliases with first arg
+    case LibFunc_memcpy_chk:
+    case LibFunc_memmove_chk:
+    case LibFunc_memccpy:
+    case LibFunc_memcpy:
+    case LibFunc_memmove:
+    case LibFunc_mempcpy: {
+		if(maxDerefLevel(I) > 1) {
+			auto arg0 = CS.getArgument(0);
+			Graph.addNode(InstantiatedValue{arg0, 1});
+			Graph.addNode(InstantiatedValue{I, 1});
+			Graph.addEdge(InstantiatedValue{arg0, 1}, InstantiatedValue{I, 1});
+        }
+		return true;
+	}
+	//allocate new node if arg is NULL, else pointee of return value alises with pointee of first arg
+	case LibFunc_realloc:
+	case LibFunc_reallocf: {
+		auto arg0 = CS.getArgument(0);
+		if(!isa<ConstantPointerNull>(arg0) && maxDerefLevel(I) > 1) { 
+			Graph.addNode(InstantiatedValue{arg0, 1});
+			Graph.addNode(InstantiatedValue{I, 1});
+			Graph.addEdge(InstantiatedValue{arg0, 1}, InstantiatedValue{I, 1});
+		}
+		return true;
+	}
+	//conversion functions
+	case LibFunc_strtod:
+	case LibFunc_strtof:
+	case LibFunc_strtol:
+	case LibFunc_strtold:
+	case LibFunc_strtoll:
+	case LibFunc_strtoul:
+	case LibFunc_strtoull: {
+		auto arg0 = CS.getArgument(0);
+		auto arg1 = CS.getArgument(1);
+		if (!isa<ConstantPointerNull>(arg1) && 
+			maxDerefLevel(arg1) > 1) {
+			Graph.addNode(InstantiatedValue{arg1, 1});
+			Graph.addEdge(InstantiatedValue{arg0, 0}, InstantiatedValue{arg1, 1});
+		}
+		return true;
+	}
     default: 
 	  return false;
   }
 }
 
-#endif
+#endif //LLVM_LIB_ANALYSIS_TAINT_KNOWN_FUNCTIONS_H
+

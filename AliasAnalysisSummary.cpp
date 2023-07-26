@@ -25,7 +25,7 @@ const AliasAttr AttrUnknown = 1 << AttrUnknownIndex;
 const AliasAttr AttrGlobal = 1 << AttrGlobalIndex;
 const AliasAttr AttrCaller = 1 << AttrCallerIndex;
 const AliasAttr AttrTainted = 1 << AttrTaintedIndex;
-const AliasAttr ExternalAttrMask = AttrEscaped | AttrUnknown | AttrGlobal;
+const AliasAttr ExternalAttrMask = AttrEscaped | AttrUnknown | AttrGlobal | AttrTainted;
 }
 
 AliasAttrs getAttrNone() { return AttrNone; }
@@ -79,8 +79,7 @@ bool hasTaintedAttr(AliasAttrs Attr) { return Attr.test(AttrTaintedIndex); }
 AliasAttrs maskTaintedAttr(AliasAttrs Attr) { return Attr & (~getAttrTainted()); }
 
 bool hasPossiblyTaintedAttr(AliasAttrs Attr) { 
-	return Attr.test(AttrTaintedIndex) 
-		|| Attr.test(AttrUnknownIndex) 
+	return Attr.test(AttrUnknownIndex) 
 		|| Attr.test(AttrEscapedIndex);
 }
 
@@ -89,12 +88,17 @@ AliasAttrs getExternallyVisibleAttrs(AliasAttrs Attr) {
 }
 
 Optional<InstantiatedValue> instantiateInterfaceValue(InterfaceValue IValue, CallSite CS, SmallVector<Value *, 4> GlobalVars) {
+  assert(CS.getCalledFunction() != nullptr);
+  auto ArgSize = CS.getCalledFunction()->arg_size();
   auto Index = IValue.Index;
+  if(Index >= ArgSize + 2 && Index - 2 - ArgSize >= GlobalVars.size()) 
+    errs() << "ArgSize: " << ArgSize << " Index: " << Index << " CS: " << *CS.getInstruction() << " CS ArgNum: " << CS.getNumArgOperands() << "\n";
   auto Value = (Index == 0) ? CS.getInstruction() : 
-			   (Index - 1 < CS.getNumArgOperands()) ? CS.getArgument(Index - 1) :
-				GlobalVars[Index - 1 - CS.getNumArgOperands()];
+			   (Index <= ArgSize + 1 && Index < CS.getNumArgOperands() + 1) ? CS.getArgument(Index - 1) : 
+			   (Index >= ArgSize + 2) ? GlobalVars[Index - 2 - ArgSize] :
+			   nullptr;
 
-  if (Value->getType()->isPointerTy())
+  if (Value && Value->getType()->isPointerTy())
     return InstantiatedValue{Value, IValue.DerefLevel};
   return None;
 }
