@@ -1148,18 +1148,18 @@ void CFLAndersTaintResult::scan(const Function &Fn) {
   int status;
   auto demangled = abi::__cxa_demangle(FName.begin(), 0, 0, &status);
   if (status==0) {
-	    errs() << "demangled function name " << FName << " to " << demangled << "\n\n";
+	    //errs() << "demangled function name " << FName << " to " << demangled << "\n\n";
 	    FName = demangled;
   }
 
-  errs() << "------------------------------------------------------\n";
-  errs() << "building info for " << FName << "\n\n";
+  //errs() << "------------------------------------------------------\n";
+  //errs() << "building info for " << FName << "\n\n";
  
   auto FunInfo = buildInfoFrom(Fn);
   Cache[&Fn] = std::move(FunInfo);
 
-  errs() << "finished building info for " << FName << "\n";
-  errs() << "------------------------------------------------------\n";
+  //errs() << "finished building info for " << FName << "\n";
+  //errs() << "------------------------------------------------------\n";
 
 
 
@@ -1257,15 +1257,15 @@ const Optional<std::vector<const Value *>> CFLAndersTaintResult::allValueAliases
     return None;
 }
 
-const Optional<std::vector<const Value *>> CFLAndersTaintResult::taintedVals(const Function &Fn) {
+const Optional<DenseSet<const Value *>> CFLAndersTaintResult::taintedVals(const Function &Fn) {
 
   auto &FunInfo = ensureCached(Fn);
   if (FunInfo.hasValue()) {
-    auto TaintedSet = FunInfo->getTaintedVals();
-    std::vector<const Value *> vals;
+    auto const TaintedSet = FunInfo->getTaintedVals();
+	DenseSet<const Value *> vals;
     for(auto Itr = TaintedSet.begin(); Itr != TaintedSet.end(); Itr++) {
         if(Itr->DerefLevel == 0) {
-            vals.push_back(Itr->Val);
+            vals.insert(Itr->Val);
         }
     }
     return vals;
@@ -1274,20 +1274,20 @@ const Optional<std::vector<const Value *>> CFLAndersTaintResult::taintedVals(con
     return None;
 }
 
-const DenseMap<const Function*, std::vector<const Value *>> CFLAndersTaintResult::taintedValsInReachableFuncs(const Function &Fn) {
+const DenseMap<const Function*, DenseSet<const Value *>> CFLAndersTaintResult::taintedValsInReachableFuncs(const Function &Fn) {
 
   auto &FuncInfo = ensureCached(Fn);
-  DenseMap<const Function*, std::vector<const Value *>> valMap;
+  DenseMap<const Function*, DenseSet<const Value *>> valMap;
   if(!FuncInfo.hasValue())
 	return valMap; 
   for (auto const &pair: Cache) {
 	auto FuncInfo = pair.second;
 	if (FuncInfo.hasValue()) {
 		auto TaintedSet = FuncInfo->getTaintedVals();
-		std::vector<const Value *> vals;
+		DenseSet<const Value *> vals;
 		for(auto Itr = TaintedSet.begin(); Itr != TaintedSet.end(); Itr++) {
 			if(Itr->DerefLevel == 0) {
-				vals.push_back(Itr->Val);
+				vals.insert(Itr->Val);
 			}
 		}
 		valMap[pair.first] = vals;

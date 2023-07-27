@@ -299,7 +299,7 @@ template <typename CFLAA> class CFLGraphBuilder {
         // Fail if the caller does not provide enough arguments
         assert(Fn->arg_size() <= CS.arg_size());
         if (!AA.getSummary(*Fn)) {
-	      errs() << "possible recursive call to " << Fn->getName() << "\n";
+	      //errs() << "possible recursive call to " << Fn->getName() << "\n";
           return false;
 		}
       }
@@ -384,13 +384,13 @@ template <typename CFLAA> class CFLGraphBuilder {
           return;
 	  }
 
-	  errs() << "unhandled call instruction  " << *Inst << "\n"; 
+	  //errs() << "unhandled call instruction  " << *Inst << "\n"; 
       if (auto F = CS.getCalledFunction()) {
         auto FName = F->getName();
 		int status;
 		auto demangled = abi::__cxa_demangle(FName.begin(), 0, 0, &status);
 		if (status==0) {
-			errs() << FName << " demangles to " << demangled << "\n\n";
+			//errs() << FName << " demangles to " << demangled << "\n\n";
 		}
 	  }
 

@@ -64,9 +64,9 @@ public:
 
   const Optional<std::vector<const Value *>> allValueAliases(const Value *);  
 
-  const Optional<std::vector<const Value *>> taintedVals(const Function&);
+  const Optional<DenseSet<const Value *>> taintedVals(const Function&);
   
-  const DenseMap<const Function*, std::vector<const Value *>> taintedValsInReachableFuncs(const Function &Fn); 
+  const DenseMap<const Function*, DenseSet<const Value *>> taintedValsInReachableFuncs(const Function &Fn); 
 
 private:
   /// Ensures that the given function is available in the cache.

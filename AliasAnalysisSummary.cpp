@@ -91,8 +91,6 @@ Optional<InstantiatedValue> instantiateInterfaceValue(InterfaceValue IValue, Cal
   assert(CS.getCalledFunction() != nullptr);
   auto ArgSize = CS.getCalledFunction()->arg_size();
   auto Index = IValue.Index;
-  if(Index >= ArgSize + 2 && Index - 2 - ArgSize >= GlobalVars.size()) 
-    errs() << "ArgSize: " << ArgSize << " Index: " << Index << " CS: " << *CS.getInstruction() << " CS ArgNum: " << CS.getNumArgOperands() << "\n";
   auto Value = (Index == 0) ? CS.getInstruction() : 
 			   (Index <= ArgSize + 1 && Index < CS.getNumArgOperands() + 1) ? CS.getArgument(Index - 1) : 
 			   (Index >= ArgSize + 2) ? GlobalVars[Index - 2 - ArgSize] :
