@@ -31,7 +31,6 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include <cxxabi.h>
 #include <cassert>
 #include <cstdint>
 #include <functional>
@@ -56,6 +55,7 @@ template <typename CFLAA> class CFLGraphBuilder {
   const TargetLibraryInfo &TLI;
   SmallVector<Value *, 4> &GlobalVars;
   const bool IsVarArg;
+  const Function& Fn;
 
   // Output of the builder
   CFLGraph Graph;
@@ -70,6 +70,8 @@ template <typename CFLAA> class CFLGraphBuilder {
     const TargetLibraryInfo &TLI;
 	SmallVector<Value *, 4> &GlobalVars;
     const bool IsVarArg;
+    const Function& Fn;
+
 
     CFLGraph &Graph;
     SmallVectorImpl<Value *> &ReturnValues;
@@ -182,7 +184,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
   public:
     GetEdgesVisitor(CFLGraphBuilder &Builder, const DataLayout &DL)
-        : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), GlobalVars(Builder.GlobalVars), IsVarArg(Builder.IsVarArg) , Graph(Builder.Graph), ReturnValues(Builder.ReturnedValues), VAArgs(Builder.VAArgs){}
+        : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), GlobalVars(Builder.GlobalVars), IsVarArg(Builder.IsVarArg), Fn(Builder.Fn), Graph(Builder.Graph), ReturnValues(Builder.ReturnedValues), VAArgs(Builder.VAArgs){}
 
     void visitInstruction(Instruction &) {
       llvm_unreachable("Unsupported instruction encountered");
@@ -304,6 +306,9 @@ template <typename CFLAA> class CFLGraphBuilder {
 		}
       }
 
+      errs() << "------------------------------------------------------\n";
+      errs() << "back to building info for " << getDemangledName(this->Fn) << "\n\n";
+
       for (auto *Fn : Fns) {
         auto Summary = AA.getSummary(*Fn);
         assert(Summary != nullptr);
@@ -384,14 +389,9 @@ template <typename CFLAA> class CFLGraphBuilder {
           return;
 	  }
 
-	  //errs() << "unhandled call instruction  " << *Inst << "\n"; 
+	  errs() << "unhandled call instruction  " << *Inst << "\n"; 
       if (auto F = CS.getCalledFunction()) {
-        auto FName = F->getName();
-		int status;
-		auto demangled = abi::__cxa_demangle(FName.begin(), 0, 0, &status);
-		if (status==0) {
-			//errs() << FName << " demangles to " << demangled << "\n\n";
-		}
+        errs() << "unhandled call to " << getDemangledName(*F) << "\n";
 	  }
 
       // Because the function is opaque, we need to note that anything
@@ -402,11 +402,12 @@ template <typename CFLAA> class CFLGraphBuilder {
         for (Value *V : CS.args()) {
           if (V->getType()->isPointerTy()) {
             // The argument itself escapes.
-            Graph.addAttr(InstantiatedValue{V, 0}, getAttrUnknown());
+            Graph.addAttr(InstantiatedValue{V, 0}, getAttrEscaped());
             // The fate of argument memory is unknown. Note that since
             // AliasAttrs is transitive with respect to dereference, we only
             // need to specify it for the first-level memory.
-            //Graph.addNode(InstantiatedValue{V, 1}, getAttrUnknown());
+			if(Graph.getCurMaxLevel(V) > 0)
+				Graph.addAttr(InstantiatedValue{V, 1}, getAttrUnknown());
           }
         }
 
@@ -597,8 +598,7 @@ template <typename CFLAA> class CFLGraphBuilder {
   }
 
 public:
-  CFLGraphBuilder(CFLAA &Analysis, const TargetLibraryInfo &TLI, SmallVector<Value *, 4> &GlobalVars, Function &Fn)
-      : Analysis(Analysis), TLI(TLI), GlobalVars(GlobalVars), IsVarArg(Fn.isVarArg()), Graph(TLI) {
+  CFLGraphBuilder(CFLAA &Analysis, const TargetLibraryInfo &TLI, SmallVector<Value *, 4> &GlobalVars, Function &Fn) : Analysis(Analysis), TLI(TLI), GlobalVars(GlobalVars), IsVarArg(Fn.isVarArg()), Fn(Fn), Graph(TLI) {
     buildGraphFrom(Fn);
   }
 

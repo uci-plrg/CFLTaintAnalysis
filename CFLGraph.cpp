@@ -56,8 +56,8 @@ CFLGraph::CFLGraph(const TargetLibraryInfo& TLI) : TLI(TLI){}
     return &Itr->second.getNodeInfoAtLevel(N.DerefLevel);
   }
   
-  unsigned CFLGraph::getCurMaxLevel(Node N) const { 
-	auto Itr = ValueImpls.find(N.Val);
+  unsigned CFLGraph::getCurMaxLevel(const Value* Val) const { 
+	auto Itr = ValueImpls.find(Val);
 	assert(Itr != ValueImpls.end());
 	return Itr->second.getNumLevels() - 1;
   }
@@ -78,7 +78,14 @@ CFLGraph::CFLGraph(const TargetLibraryInfo& TLI) : TLI(TLI){}
     auto &ValInfo = ValueImpls[N.Val];
     auto Changed = ValInfo.addNodeToLevel(N.DerefLevel);
     auto &NodeInfo = ValInfo.getNodeInfoAtLevel(N.DerefLevel);
-    NodeInfo.Attr |= Attr;    
+    NodeInfo.Attr |= Attr;
+    
+	if(hasTaintedAttr(Attr))
+      errs() << " add tainted attr to " << N << "\n";
+	if(!isValueImmutable(N.Val) && hasUnknownAttr(Attr))
+      errs() << " add unknown attr to mutable " << N << "\n";
+	if(!isValueImmutable(N.Val) && hasEscapedAttr(Attr))
+	  errs() << " add escpaed attr to mutable " << N << "\n";
 
     return Changed;
   }
@@ -87,6 +94,13 @@ CFLGraph::CFLGraph(const TargetLibraryInfo& TLI) : TLI(TLI){}
     auto *Info = getNode(N);
     assert(Info != nullptr);
     Info->Attr |= Attr;
+
+	if(hasTaintedAttr(Attr))
+      errs() << " add tainted attr to " << N << "\n";
+	if(!isValueImmutable(N.Val) && hasUnknownAttr(Attr))
+      errs() << " add unknown attr to mutable " << N << "\n";
+	if(!isValueImmutable(N.Val) && hasEscapedAttr(Attr))
+	  errs() << " add escpaed attr to mutable " << N << "\n";
   }
 
   void CFLGraph::addEdge(Node From, Node To, int64_t Offset) {

@@ -78,11 +78,6 @@ bool hasTaintedAttr(AliasAttrs Attr) { return Attr.test(AttrTaintedIndex); }
 
 AliasAttrs maskTaintedAttr(AliasAttrs Attr) { return Attr & (~getAttrTainted()); }
 
-bool hasPossiblyTaintedAttr(AliasAttrs Attr) { 
-	return Attr.test(AttrUnknownIndex) 
-		|| Attr.test(AttrEscapedIndex);
-}
-
 AliasAttrs getExternallyVisibleAttrs(AliasAttrs Attr) {
   return Attr & AliasAttrs(ExternalAttrMask);
 }

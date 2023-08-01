@@ -78,7 +78,7 @@ private:
 public:
   using const_value_iterator = ValueMap::const_iterator;
  
-  unsigned getCurMaxLevel(Node N) const; 
+  unsigned getCurMaxLevel(const Value* Val) const; 
   
   void addLevel(Node N, unsigned Level);
 

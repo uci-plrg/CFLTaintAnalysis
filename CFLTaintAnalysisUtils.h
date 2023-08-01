@@ -17,6 +17,8 @@
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/ValueHandle.h"
 
+#include <cxxabi.h>
+
 namespace llvm {
 namespace cflta {
 
@@ -68,6 +70,17 @@ static inline bool isValueImmutable(const Value *V) {
 	if(auto GV = dyn_cast<GlobalVariable>(V))
 		return GV->isConstant();
     return isa<Constant>(V);
+}
+
+static inline StringRef getDemangledName(const Function& Fn) {
+  auto FName = Fn.getName();
+  int status;
+  auto demangled = abi::__cxa_demangle(FName.begin(), 0, 0, &status);
+  if (status==0) {
+  		errs() << "demangled function name " << FName << " to " << demangled << "\n\n";
+  	    FName = demangled;
+  }
+  return FName;
 }
 
 } // namespace llvm

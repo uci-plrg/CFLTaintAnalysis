@@ -93,9 +93,6 @@ bool hasGlobalAttr(AliasAttrs);
 AliasAttrs getAttrTainted();
 bool hasTaintedAttr(AliasAttrs Attr);
 AliasAttrs maskTaintedAttr(AliasAttrs Attr);
- 
-// Possibly Tainted means either tainted, unknown, or escaped
-bool hasPossiblyTaintedAttr(AliasAttrs Attr); 
 
 /// Given an AliasAttrs, return a new AliasAttrs that only contains attributes
 /// meaningful to the caller. This function is primarily used for

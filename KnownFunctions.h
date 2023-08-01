@@ -60,6 +60,7 @@ bool isNoAliasIntrinsic(const IntrinsicInst *II) {
       case Intrinsic::ssub_sat:
 	  //unclassified
 	  case Intrinsic::bswap:
+	  case Intrinsic::ctlz:
         return true;
     }
 

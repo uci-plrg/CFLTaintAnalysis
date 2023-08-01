@@ -87,7 +87,6 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <cxxabi.h>
 #include <functional>
 #include <utility>
 #include <vector>
@@ -147,8 +146,6 @@ const unsigned WriteOnlyStateMask =
 const unsigned ReadWriteStateMask =
     (1U << static_cast<uint8_t>(MatchState::FlowToReadWrite)) |
     (1U << static_cast<uint8_t>(MatchState::FlowToMemAliasReadWrite));
-const unsigned NonReadStateMask =
-    (1U << static_cast<uint8_t>(MatchState::FlowFromMemAliasNoReadWrite)) | WriteOnlyStateMask;
 
 static bool hasReadOnlyState(StateSet Set) {
   return (Set & StateSet(ReadOnlyStateMask)).any();
@@ -158,8 +155,8 @@ static bool hasWriteOnlyState(StateSet Set) {
   return (Set & StateSet(WriteOnlyStateMask)).any();
 }
 
-static bool hasNonReadState(StateSet Set) {
-  return (Set & StateSet(NonReadStateMask)).any();
+static bool hasNonFlowFromReadOnlyState(StateSet Set) {
+  return (Set & ~StateSet(1U << static_cast<uint8_t>(MatchState::FlowFromReadOnly))).any();
 }
 
 static bool hasReadWriteState(StateSet Set) {
@@ -192,6 +189,9 @@ bool operator<(OffsetValue LHS, OffsetValue RHS) {
          (LHS.Val == RHS.Val && LHS.Offset < RHS.Offset);
 }
 
+inline raw_ostream &operator<<(raw_ostream &OS, const OffsetValue &OV) {
+    return OS << *OV.Val << " at offset " << OV.Offset;
+}
 // A pair that consists of an InstantiatedValue and an offset
 struct OffsetInstantiatedValue {
   InstantiatedValue IVal;
@@ -200,6 +200,10 @@ struct OffsetInstantiatedValue {
 
 bool operator==(OffsetInstantiatedValue LHS, OffsetInstantiatedValue RHS) {
   return LHS.IVal == RHS.IVal && LHS.Offset == RHS.Offset;
+}
+
+inline raw_ostream &operator<<(raw_ostream &OS, const OffsetInstantiatedValue &OIV) {
+    return OS << OIV.IVal << " offset " << OIV.Offset;
 }
 
 // We use ReachabilitySet to keep track of value aliases (The nonterminal "V" in
@@ -621,7 +625,7 @@ TaintedSet CFLAndersTaintResult::FunctionInfo::propagateTaintSources(const Taint
 		}
 
 		for(auto &Mapping: RevReachSet.reachableValueAliases(Source)) {
-			if(hasNonReadState(Mapping.second)) {
+			if(hasNonFlowFromReadOnlyState(Mapping.second)) {
 				if(TaintedVals.insert(Mapping.first).second) {			
 					NewTaint.insert(Mapping.first);
 				    //errs() << "nonread alias of taint source " << Mapping.first << "\n";
@@ -811,6 +815,11 @@ static void propagate(InstantiatedValue From, InstantiatedValue To,
 
 }
 
+static inline bool isPossiblyTainted(const Value *Val, const AliasAttrs Attr) {
+	return hasTaintedAttr(Attr) || 
+		   (!isValueImmutable(Val) && (hasEscapedAttr(Attr) || hasUnknownAttr(Attr))); 
+}
+
 static void initializeWorkList(std::vector<WorkListItem> &WorkList,
                                ReachabilitySet &ReachSet,
                                const CFLGraph &Graph,
@@ -851,8 +860,7 @@ static void initializeWorkList(std::vector<WorkListItem> &WorkList,
 				for (auto &Edge : NodeInfo.ReverseEdges)
                     propagate(Src, Edge.Other, MatchState::FlowFromReadOnly, ReachSet, WorkList);
             }
-			if(hasTaintedAttr(NodeInfo.Attr) || 
-			   (!isValueImmutable(Val) && hasPossiblyTaintedAttr(NodeInfo.Attr))) {
+			if(isPossiblyTainted(Val, NodeInfo.Attr)) {
 			  //taint sources only propagate through toEdges
 			  for (auto &Edge : NodeInfo.Edges)
                     propagate(Src, Edge.Other, MatchState::FlowToWriteOnly, ReachSet, WorkList);
@@ -884,7 +892,7 @@ static Optional<InstantiatedValue> getNodeAbove(const CFLGraph &Graph,
 static void matchLevelsChecked(CFLGraph &Graph, InstantiatedValue ToChange, const InstantiatedValue Target) {
   // if not limited by max level, 
   // deref levels may grow infinitely due to getelementptr 
-  unsigned NewLevel = ToChange.DerefLevel + (Graph.getCurMaxLevel(Target) - Target.DerefLevel);
+  unsigned NewLevel = ToChange.DerefLevel + (Graph.getCurMaxLevel(Target.Val) - Target.DerefLevel);
   NewLevel = std::min(NewLevel, maxDerefLevel(ToChange.Val));
   Graph.addLevel(ToChange, NewLevel);
 }
@@ -1043,7 +1051,7 @@ static AliasAttrMap buildAttrMap(const CFLGraph &Graph,
       // Propagate attr on the same level
       for (const auto &Mapping : RevReachSet.reachableValueAliases(Src)) {
         auto Dst = Mapping.first;
-		auto Attr = hasNonReadState(Mapping.second)? SrcAttr : maskTaintedAttr(SrcAttr);
+		auto Attr = hasNonFlowFromReadOnlyState(Mapping.second)? SrcAttr : maskTaintedAttr(SrcAttr);
         if (AttrMap.add(Dst, Attr)) {
           NextList.push_back(Dst);
 		}
@@ -1077,10 +1085,9 @@ static TaintedSet buildTaintedVals(const CFLGraph &Graph,
 		for (unsigned I = 0, E = ValueInfo.getNumLevels(); I < E; ++I) {
 			auto Node = InstantiatedValue{Val, I};
 			auto Attr = AttrMap.getAttrs(Node);
-			if(hasTaintedAttr(Attr) || 
-			   (!isValueImmutable(Val) && hasPossiblyTaintedAttr(Attr))) {
+			if(isPossiblyTainted(Val, Attr)) {
 				TaintedVals.insert(Node);
-				//errs() << "add to tainted values" << Node << " tainted? "  << hasTaintedAttr(Attr) << "\n";
+				//errs() << "add to tainted values" << Node << "\n";
 			}
 		}
 	}
@@ -1144,24 +1151,12 @@ void CFLAndersTaintResult::scan(const Function &Fn) {
   // Note that we can't do Cache[Fn] = buildSetsFrom(Fn) here: the function call
   // may get evaluated after operator[], potentially triggering a DenseMap
   // resize and invalidating the reference returned by operator[]  
-  auto FName = Fn.getName();
-  int status;
-  auto demangled = abi::__cxa_demangle(FName.begin(), 0, 0, &status);
-  if (status==0) {
-	    //errs() << "demangled function name " << FName << " to " << demangled << "\n\n";
-	    FName = demangled;
-  }
 
-  //errs() << "------------------------------------------------------\n";
-  //errs() << "building info for " << FName << "\n\n";
+  errs() << "------------------------------------------------------\n";
+  errs() << "building info for " << getDemangledName(Fn) << "\n\n";
  
   auto FunInfo = buildInfoFrom(Fn);
   Cache[&Fn] = std::move(FunInfo);
-
-  //errs() << "finished building info for " << FName << "\n";
-  //errs() << "------------------------------------------------------\n";
-
-
 
   Handles.emplace_front(const_cast<Function *>(&Fn), this);
 }
