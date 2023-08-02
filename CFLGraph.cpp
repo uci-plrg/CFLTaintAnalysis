@@ -80,12 +80,12 @@ CFLGraph::CFLGraph(const TargetLibraryInfo& TLI) : TLI(TLI){}
     auto &NodeInfo = ValInfo.getNodeInfoAtLevel(N.DerefLevel);
     NodeInfo.Attr |= Attr;
     
-	if(hasTaintedAttr(Attr))
-      errs() << " add tainted attr to " << N << "\n";
-	if(!isValueImmutable(N.Val) && hasUnknownAttr(Attr))
-      errs() << " add unknown attr to mutable " << N << "\n";
-	if(!isValueImmutable(N.Val) && hasEscapedAttr(Attr))
-	  errs() << " add escpaed attr to mutable " << N << "\n";
+	//if(hasTaintedAttr(Attr))
+    //  errs() << " add tainted attr to " << N << "\n";
+	//if(!isValueImmutable(N.Val) && hasUnknownAttr(Attr))
+    //  errs() << " add unknown attr to mutable " << N << "\n";
+	//if(!isValueImmutable(N.Val) && hasEscapedAttr(Attr))
+	//  errs() << " add escpaed attr to mutable " << N << "\n";
 
     return Changed;
   }
@@ -95,12 +95,12 @@ CFLGraph::CFLGraph(const TargetLibraryInfo& TLI) : TLI(TLI){}
     assert(Info != nullptr);
     Info->Attr |= Attr;
 
-	if(hasTaintedAttr(Attr))
-      errs() << " add tainted attr to " << N << "\n";
-	if(!isValueImmutable(N.Val) && hasUnknownAttr(Attr))
-      errs() << " add unknown attr to mutable " << N << "\n";
-	if(!isValueImmutable(N.Val) && hasEscapedAttr(Attr))
-	  errs() << " add escpaed attr to mutable " << N << "\n";
+	//if(hasTaintedAttr(Attr))
+    //  errs() << " add tainted attr to " << N << "\n";
+	//if(!isValueImmutable(N.Val) && hasUnknownAttr(Attr))
+    //  errs() << " add unknown attr to mutable " << N << "\n";
+	//if(!isValueImmutable(N.Val) && hasEscapedAttr(Attr))
+	//  errs() << " add escpaed attr to mutable " << N << "\n";
   }
 
   void CFLGraph::addEdge(Node From, Node To, int64_t Offset) {

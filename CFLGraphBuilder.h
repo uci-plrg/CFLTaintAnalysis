@@ -306,8 +306,8 @@ template <typename CFLAA> class CFLGraphBuilder {
 		}
       }
 
-      errs() << "------------------------------------------------------\n";
-      errs() << "back to building info for " << getDemangledName(this->Fn) << "\n\n";
+      //errs() << "------------------------------------------------------\n";
+      //errs() << "back to building info for " << getDemangledName(this->Fn) << "\n\n";
 
       for (auto *Fn : Fns) {
         auto Summary = AA.getSummary(*Fn);
@@ -389,9 +389,9 @@ template <typename CFLAA> class CFLGraphBuilder {
           return;
 	  }
 
-	  errs() << "unhandled call instruction  " << *Inst << "\n"; 
+	  //errs() << "unhandled call instruction  " << *Inst << "\n"; 
       if (auto F = CS.getCalledFunction()) {
-        errs() << "unhandled call to " << getDemangledName(*F) << "\n";
+        //errs() << "unhandled call to " << getDemangledName(*F) << "\n";
 	  }
 
       // Because the function is opaque, we need to note that anything

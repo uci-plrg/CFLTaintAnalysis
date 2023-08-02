@@ -118,7 +118,7 @@ public:
 };
 
 /// Legacy wrapper pass to provide the CFLAndersTaintResult object.
-class CFLAndersTaintWrapperPass : public ImmutablePass {
+class CFLAndersTaintWrapperPass : public ModulePass {
   std::unique_ptr<CFLAndersTaintResult> Result;
   
 public:
@@ -128,8 +128,8 @@ public:
   CFLAndersTaintResult &getResult() { return *Result; }
   const CFLAndersTaintResult &getResult() const { return *Result; }
  
-  //bool runOnModule(Module &M);
-  void initializePass() override;
+  bool runOnModule(Module &M);
+  //void initializePass() override;
   void getAnalysisUsage(AnalysisUsage &AU) const override;
 };
 

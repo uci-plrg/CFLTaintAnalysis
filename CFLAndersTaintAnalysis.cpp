@@ -1152,8 +1152,8 @@ void CFLAndersTaintResult::scan(const Function &Fn) {
   // may get evaluated after operator[], potentially triggering a DenseMap
   // resize and invalidating the reference returned by operator[]  
 
-  errs() << "------------------------------------------------------\n";
-  errs() << "building info for " << getDemangledName(Fn) << "\n\n";
+  //errs() << "------------------------------------------------------\n";
+  //errs() << "building info for " << getDemangledName(Fn) << "\n\n";
  
   auto FunInfo = buildInfoFrom(Fn);
   Cache[&Fn] = std::move(FunInfo);
@@ -1304,18 +1304,24 @@ static RegisterPass<CFLAndersTaintWrapperPass> X("cfl-anders-taint", "Inclusion-
 //INITIALIZE_PASS(CFLAndersTaintWrapperPass, "cfl-anders-taint",
 //                "Inclusion-Based CFL Taint Analysis", false, true)
 
-//ModulePass *llvm::createCFLAndersTaintWrapperPass() {
-//  return new CFLAndersTaintWrapperPass();
-//}
 
-CFLAndersTaintWrapperPass::CFLAndersTaintWrapperPass() : ImmutablePass(ID) {
+bool CFLAndersTaintWrapperPass::runOnModule(Module &M) {
+    auto &TLIWP = getAnalysis<TargetLibraryInfoWrapperPass>();
+	Result.reset(new CFLAndersTaintResult(TLIWP.getTLI()));
+	for (auto FItr = M.begin(), FEnd = M.end(); FItr != FEnd;  FItr++) {
+		Result->taintedVals(*FItr);
+	}
+	return true;
+}
+
+CFLAndersTaintWrapperPass::CFLAndersTaintWrapperPass() : ModulePass(ID) {
   //initializeCFLAndersTaintWrapperPassPass(*PassRegistry::getPassRegistry());
 }
 
-void CFLAndersTaintWrapperPass::initializePass() {
-  auto &TLIWP = getAnalysis<TargetLibraryInfoWrapperPass>();
-  Result.reset(new CFLAndersTaintResult(TLIWP.getTLI()));
-}
+//void CFLAndersTaintWrapperPass::initializePass() {
+//  auto &TLIWP = getAnalysis<TargetLibraryInfoWrapperPass>();
+//  Result.reset(new CFLAndersTaintResult(TLIWP.getTLI()));
+//}
 
 void CFLAndersTaintWrapperPass::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesAll();
