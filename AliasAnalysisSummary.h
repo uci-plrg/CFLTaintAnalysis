@@ -40,6 +40,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/CallSite.h"
 #include <bitset>
+#include <variant>
 
 namespace llvm {
 namespace cflta {
@@ -213,7 +214,7 @@ struct InstantiatedValue {
   Value *Val;
   unsigned DerefLevel;
 };
-Optional<InstantiatedValue> instantiateInterfaceValue(InterfaceValue, CallSite, SmallVector<Value *, 4>);
+Optional<InstantiatedValue> instantiateInterfaceValue(InterfaceValue, CallSite);
 
 inline bool operator==(InstantiatedValue LHS, InstantiatedValue RHS) {
   return LHS.Val == RHS.Val && LHS.DerefLevel == RHS.DerefLevel;
@@ -244,7 +245,7 @@ struct InstantiatedRelation {
   InstantiatedValue From, To;
   int64_t Offset;
 };
-Optional<InstantiatedRelation> instantiateExternalRelation(ExternalRelation, CallSite, SmallVector<Value *, 4>);
+Optional<InstantiatedRelation> instantiateExternalRelation(ExternalRelation, CallSite);
 
 /// This is the result of instantiating ExternalAttribute at a particular
 /// callsite
@@ -252,8 +253,7 @@ struct InstantiatedAttr {
   InstantiatedValue IValue;
   AliasAttrs Attr;
 };
-Optional<InstantiatedAttr> instantiateExternalAttribute(ExternalAttribute,
-CallSite, SmallVector<Value *, 4>);
+Optional<InstantiatedAttr> instantiateExternalAttribute(ExternalAttribute, CallSite);
 }
 
 template <> struct DenseMapInfo<cflta::InstantiatedValue> {

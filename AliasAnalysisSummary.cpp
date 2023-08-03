@@ -25,7 +25,7 @@ const AliasAttr AttrUnknown = 1 << AttrUnknownIndex;
 const AliasAttr AttrGlobal = 1 << AttrGlobalIndex;
 const AliasAttr AttrCaller = 1 << AttrCallerIndex;
 const AliasAttr AttrTainted = 1 << AttrTaintedIndex;
-const AliasAttr ExternalAttrMask = AttrEscaped | AttrUnknown | AttrGlobal | AttrTainted;
+const AliasAttr ExternalAttrMask = AttrEscaped | AttrUnknown | /*AttrGlobal |*/ AttrTainted;
 }
 
 AliasAttrs getAttrNone() { return AttrNone; }
@@ -82,13 +82,10 @@ AliasAttrs getExternallyVisibleAttrs(AliasAttrs Attr) {
   return Attr & AliasAttrs(ExternalAttrMask);
 }
 
-Optional<InstantiatedValue> instantiateInterfaceValue(InterfaceValue IValue, CallSite CS, SmallVector<Value *, 4> GlobalVars) {
-  assert(CS.getCalledFunction() != nullptr);
-  auto ArgSize = CS.getCalledFunction()->arg_size();
+Optional<InstantiatedValue> instantiateInterfaceValue(InterfaceValue IValue, CallSite CS) {
   auto Index = IValue.Index;
   auto Value = (Index == 0) ? CS.getInstruction() : 
-			   (Index <= ArgSize + 1 && Index < CS.getNumArgOperands() + 1) ? CS.getArgument(Index - 1) : 
-			   (Index >= ArgSize + 2) ? GlobalVars[Index - 2 - ArgSize] :
+			   (Index < CS.getNumArgOperands() + 1) ? CS.getArgument(Index - 1) :
 			   nullptr;
 
   if (Value && Value->getType()->isPointerTy())
@@ -97,18 +94,18 @@ Optional<InstantiatedValue> instantiateInterfaceValue(InterfaceValue IValue, Cal
 }
 
 Optional<InstantiatedRelation>
-instantiateExternalRelation(ExternalRelation ERelation, CallSite CS, SmallVector<Value *, 4> GlobalVars) {
-  auto From = instantiateInterfaceValue(ERelation.From, CS, GlobalVars);
+instantiateExternalRelation(ExternalRelation ERelation, CallSite CS) {
+  auto From = instantiateInterfaceValue(ERelation.From, CS);
   if (!From)
     return None;
-  auto To = instantiateInterfaceValue(ERelation.To, CS, GlobalVars);
+  auto To = instantiateInterfaceValue(ERelation.To, CS);
   if (!To)
     return None;
   return InstantiatedRelation{*From, *To, ERelation.Offset};
 }
 
-Optional<InstantiatedAttr> instantiateExternalAttribute(ExternalAttribute EAttr, CallSite CS, SmallVector<Value *,4> GlobalVars) {
-  auto Value = instantiateInterfaceValue(EAttr.IValue, CS, GlobalVars);
+Optional<InstantiatedAttr> instantiateExternalAttribute(ExternalAttribute EAttr, CallSite CS) {
+  auto Value = instantiateInterfaceValue(EAttr.IValue, CS);
   if (!Value)
     return None;
   return InstantiatedAttr{*Value, EAttr.Attr};

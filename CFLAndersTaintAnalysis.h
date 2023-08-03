@@ -87,9 +87,6 @@ private:
   /// that simply has empty sets.
   DenseMap<const Function *, Optional<FunctionInfo>> Cache;
 
-  //Global variables in the module;
-  Optional<SmallVector<Value *, 4>> GlobalVars;
-
   //Save all globals tainted
   TaintedSet TaintedGlobalVars;
 

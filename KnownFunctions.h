@@ -16,7 +16,7 @@
 
 #include <algorithm>
 
-//#define ALL_ALLOC_FN_PMEM 1
+#define ALL_ALLOC_FN_PMEM 1
 
 using namespace llvm;
 using namespace llvm::cflta;

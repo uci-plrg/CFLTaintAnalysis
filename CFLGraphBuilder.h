@@ -53,7 +53,6 @@ template <typename CFLAA> class CFLGraphBuilder {
   // Input of the builder
   CFLAA &Analysis;
   const TargetLibraryInfo &TLI;
-  SmallVector<Value *, 4> &GlobalVars;
   const bool IsVarArg;
   const Function& Fn;
 
@@ -68,7 +67,6 @@ template <typename CFLAA> class CFLGraphBuilder {
     CFLAA &AA;
     const DataLayout &DL;
     const TargetLibraryInfo &TLI;
-	SmallVector<Value *, 4> &GlobalVars;
     const bool IsVarArg;
     const Function& Fn;
 
@@ -184,7 +182,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
   public:
     GetEdgesVisitor(CFLGraphBuilder &Builder, const DataLayout &DL)
-        : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), GlobalVars(Builder.GlobalVars), IsVarArg(Builder.IsVarArg), Fn(Builder.Fn), Graph(Builder.Graph), ReturnValues(Builder.ReturnedValues), VAArgs(Builder.VAArgs){}
+        : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), IsVarArg(Builder.IsVarArg), Fn(Builder.Fn), Graph(Builder.Graph), ReturnValues(Builder.ReturnedValues), VAArgs(Builder.VAArgs){}
 
     void visitInstruction(Instruction &) {
       llvm_unreachable("Unsupported instruction encountered");
@@ -193,7 +191,12 @@ template <typename CFLAA> class CFLGraphBuilder {
     void visitReturnInst(ReturnInst &Inst) {
       if (auto RetVal = Inst.getReturnValue()) {
         if (RetVal->getType()->isPointerTy()) {
-          addNode(RetVal);
+		  //currently returned global vars are not modelled due to the cost of searching for the resulting aliases
+		  auto Attr = getAttrNone();
+		  if(auto GVal = dyn_cast<GlobalVariable>(RetVal))
+		    if(!GVal->isConstant())
+			  Attr = getAttrEscaped();
+		  addNode(RetVal, Attr);
           ReturnValues.push_back(RetVal);
         }
       }
@@ -340,7 +343,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
         auto &RetParamRelations = Summary->RetParamRelations;
         for (auto &Relation : RetParamRelations) {
-          auto IRelation = instantiateExternalRelation(Relation, CS, GlobalVars);
+          auto IRelation = instantiateExternalRelation(Relation, CS);
           if (IRelation.hasValue()) {
             Graph.addNode(IRelation->From);
             Graph.addNode(IRelation->To);
@@ -350,7 +353,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
         auto &RetParamAttributes = Summary->RetParamAttributes;
         for (auto &Attribute : RetParamAttributes) {
-          auto IAttr = instantiateExternalAttribute(Attribute, CS, GlobalVars);
+          auto IAttr = instantiateExternalAttribute(Attribute, CS);
           if (IAttr.hasValue())
             Graph.addNode(IAttr->IValue, IAttr->Attr);
         }
@@ -598,7 +601,7 @@ template <typename CFLAA> class CFLGraphBuilder {
   }
 
 public:
-  CFLGraphBuilder(CFLAA &Analysis, const TargetLibraryInfo &TLI, SmallVector<Value *, 4> &GlobalVars, Function &Fn) : Analysis(Analysis), TLI(TLI), GlobalVars(GlobalVars), IsVarArg(Fn.isVarArg()), Fn(Fn), Graph(TLI) {
+  CFLGraphBuilder(CFLAA &Analysis, const TargetLibraryInfo &TLI, Function &Fn) : Analysis(Analysis), TLI(TLI), IsVarArg(Fn.isVarArg()), Fn(Fn), Graph(TLI) {
     buildGraphFrom(Fn);
   }
 

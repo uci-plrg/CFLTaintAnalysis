@@ -155,18 +155,12 @@ static bool hasWriteOnlyState(StateSet Set) {
   return (Set & StateSet(WriteOnlyStateMask)).any();
 }
 
-static bool hasNonFlowFromReadOnlyState(StateSet Set) {
-  return (Set & ~StateSet(1U << static_cast<uint8_t>(MatchState::FlowFromReadOnly))).any();
-}
-
 static bool hasReadWriteState(StateSet Set) {
   return (Set & StateSet(ReadWriteStateMask)).any();
 }
 
-static bool notReadState(MatchState State) {
-  return State == MatchState::FlowToWriteOnly ||
-         State == MatchState::FlowFromMemAliasNoReadWrite ||
-         State == MatchState::FlowToMemAliasWriteOnly;
+static bool hasReadOrWriteState(StateSet Set) {
+  return (Set & (StateSet(ReadWriteStateMask) | StateSet(WriteOnlyStateMask) | StateSet(ReadOnlyStateMask))).any();
 }
 
 static bool notMemAliasState(MatchState State) {
@@ -208,9 +202,24 @@ inline raw_ostream &operator<<(raw_ostream &OS, const OffsetInstantiatedValue &O
 
 // We use ReachabilitySet to keep track of value aliases (The nonterminal "V" in
 // the paper) during the analysis.
+using ValueStateMap = DenseMap<InstantiatedValue, StateSet>;
+
+class ValueReachMap : public DenseMap<InstantiatedValue, ValueStateMap> {
+public:
+  iterator_range<ValueStateMap::const_iterator>
+  reachableValueAliases(InstantiatedValue V) const {
+    auto Itr = find(V);
+    if (Itr == end()) {
+      return make_range<ValueStateMap::const_iterator>(ValueStateMap::const_iterator(),
+                                                       ValueStateMap::const_iterator());
+	}
+    return make_range<ValueStateMap::const_iterator>(Itr->second.begin(),
+                                                 Itr->second.end());
+  }
+
+};
+
 class ReachabilitySet {
-  using ValueStateMap = DenseMap<InstantiatedValue, StateSet>;
-  using ValueReachMap = DenseMap<InstantiatedValue, ValueStateMap>;
 
   ValueReachMap ReachMap;
 
@@ -233,27 +242,21 @@ public:
   // Return the set of all ('From', 'State') pair for a given node 'To'
   iterator_range<const_valuestate_iterator>
   reachableValueAliases(InstantiatedValue V) const {
-    auto Itr = ReachMap.find(V);
-    if (Itr == ReachMap.end()) {
-      return make_range<const_valuestate_iterator>(const_valuestate_iterator(),
-                                                   const_valuestate_iterator());
-	}
-    return make_range<const_valuestate_iterator>(Itr->second.begin(),
-                                                 Itr->second.end());
-  }
-
-  ReachabilitySet getRevReachSet() const {
-	ReachabilitySet RevReachSet;
-	for(auto const& outer: ReachMap) {
-		for(auto const& inner: outer.second) {
-			RevReachSet.ReachMap[inner.first][outer.first] = inner.second;
-		}
-	}
-	return RevReachSet;
+    return ReachMap.reachableValueAliases(V);
   }
 
   iterator_range<const_value_iterator> value_mappings() const {
     return make_range<const_value_iterator>(ReachMap.begin(), ReachMap.end());
+  }
+
+  const ValueReachMap getRevReachMap() const {
+	ValueReachMap RevReachMap;
+	for(auto const& outer: ReachMap) {
+		for(auto const& inner: outer.second) {
+			RevReachMap[inner.first][outer.first] = inner.second;
+		}
+	}
+	return RevReachMap;
   }
 };
 
@@ -398,7 +401,7 @@ class CFLAndersTaintResult::FunctionInfo {
   //TODO: replace all uses of AliasMap with RevReachMap, which subsumes it.
   // Map a value to its reachable values (i.e. its aliases) and the CFL state it 
   // reaches them in 
-  ReachabilitySet RevReachSet;
+  ValueReachMap RevReachMap;
 
   /// Map a value to its corresponding AliasAttrs
   DenseMap<const Value *, AliasAttrs> AttrMap;
@@ -410,10 +413,9 @@ class CFLAndersTaintResult::FunctionInfo {
 
 public:
   FunctionInfo(const Function &, const SmallVector<Value *, 4> &,
-			   const SmallVector<Value *, 4> &, const SmallVector<Value *, 4> &,
-			   const ReachabilitySet &, const AliasAttrMap &, 
-			   const TaintedSet &);
-  TaintedSet propagateTaintSources(const TaintedSet&); 
+			   const SmallVector<Value *, 4> &, const ValueReachMap &, 
+               const AliasAttrMap &, const TaintedSet &);
+  TaintedSet propagateExternalTaint(const TaintedSet&); 
   bool mayAlias(const Value *, LocationSize, const Value *, LocationSize) const;
 
   Optional<std::vector<const Value *>> getValueAliases(const Value *) const;
@@ -421,7 +423,7 @@ public:
   const TaintedSet &getTaintedVals() const { return TaintedVals; }
   const DenseMap<const Value *, AliasAttrs> &getAttrMap() const { return AttrMap; }
   const AliasSummary &getSummary() const { return Summary; }
-  const ReachabilitySet &getRevReachSet() const { return RevReachSet; }
+  const ValueReachMap &getRevReachMap() const { return RevReachMap; }
  
 };
 
@@ -429,7 +431,6 @@ static Optional<InterfaceValue>
 getInterfaceValue(InstantiatedValue IValue,
 				  const Function &Fn,
                   const SmallVectorImpl<Value *> &RetVals,
-				  const SmallVectorImpl<Value *> &GlobalVars,
 				  const SmallVectorImpl <Value *> &VAArgs) {
   //Globals are handled in getGlobalInterfaceValue
   auto Val = IValue.Val;
@@ -442,11 +443,6 @@ getInterfaceValue(InstantiatedValue IValue,
 	Index = ArgSize + 1;
   else if (is_contained(RetVals, Val))
     Index = 0;
-  else if (isa<GlobalVariable>(Val)) {
-    auto Pos = std::lower_bound(GlobalVars.begin(), GlobalVars.end(), Val);
-    if(Pos != GlobalVars.end())
-	  Index = 2 + ArgSize + std::distance(GlobalVars.begin(), Pos);	
-  }
 
   if (Index)
     return InterfaceValue{*Index, IValue.DerefLevel};
@@ -468,8 +464,8 @@ static void populateAttrMap(DenseMap<const Value *, AliasAttrs> &AttrMap,
 
 static void
 populateAliasMap(DenseMap<const Value *, std::vector<OffsetValue>> &AliasMap,
-                 const ReachabilitySet &RevReachSet) {
-  for (const auto &OuterMapping : RevReachSet.value_mappings()) {
+                 const ValueReachMap &RevReachMap) {
+  for (const auto &OuterMapping : RevReachMap) {
     // AliasMap only cares about top-level values
     if (OuterMapping.first.DerefLevel > 0)
       continue;
@@ -487,10 +483,115 @@ populateAliasMap(DenseMap<const Value *, std::vector<OffsetValue>> &AliasMap,
   }
 }
 
+static DenseMap<Value *, unsigned>buildDepthMap(const ValueReachMap &RevReachMap, const AliasAttrMap &AMap) {
+	DenseMap<Value *, unsigned> DepthMap;
+	for (auto &Mapping: RevReachMap) {
+		auto IVal = Mapping.first;
+		auto Itr = DepthMap.find(IVal.Val);
+		if(Itr == DepthMap.end() || Itr->second < IVal.DerefLevel)
+			 DepthMap[IVal.Val] = IVal.DerefLevel;
+	}	
+	for (auto &Mapping: AMap.mappings()) {
+		auto IVal = Mapping.first;
+		auto Itr = DepthMap.find(IVal.Val);
+		if(Itr == DepthMap.end() || Itr->second < IVal.DerefLevel)
+			 DepthMap[IVal.Val] = IVal.DerefLevel;
+	}			
+	return DepthMap;
+}
+
+static void populateAliasSummary(
+	AliasSummary &Summary, const Function &Fn,
+    const SmallVectorImpl<Value *> &RetVals, const SmallVectorImpl<Value *> &VAArgs, 
+    const ValueReachMap &RevReachMap, const AliasAttrMap &AMap) {
+
+	auto &ExtRelations = Summary.RetParamRelations;
+	auto &ExtAttributes = Summary.RetParamAttributes;
+
+  // If a function only returns one of its argument X, then X will be both an
+  // argument and a return value at the same time. This is an edge case that
+  // needs special handling here.
+  for (const auto &Arg : Fn.args()) {
+    if (is_contained(RetVals, &Arg)) {
+      auto ArgVal = InterfaceValue{Arg.getArgNo() + 1, 0};
+      auto RetVal = InterfaceValue{0, 0};
+      ExtRelations.push_back(ExternalRelation{ArgVal, RetVal, 0});
+    }
+  }
+
+ //the case where the function returns a variadic argument
+  for (const auto *Arg: VAArgs) {
+ 	if (is_contained(RetVals, Arg)) {
+       auto ArgVal = InterfaceValue{(unsigned)(Fn.arg_size() + 1), 0};
+       auto RetVal = InterfaceValue{0, 0};
+       ExtRelations.push_back(ExternalRelation{ArgVal, RetVal, 0});
+   }
+  }
+   
+  auto DepthMap = buildDepthMap(RevReachMap, AMap);
+
+  for (const auto &OuterMapping : RevReachMap) {
+	auto IVal = OuterMapping.first;
+    if (auto Src = getInterfaceValue(IVal, Fn, RetVals, VAArgs)) {
+	  auto SrcVal = IVal.Val;
+	  unsigned MaxLevel = maxDerefLevel(SrcVal);
+
+      DenseSet<std::pair<InstantiatedValue, unsigned>> WorkSet1, WorkSet2;
+	  auto *CurWorkSet = &WorkSet1, *NextWorkSet = &WorkSet2;
+      CurWorkSet->insert(std::make_pair(IVal, Src->DerefLevel));
+      while(!CurWorkSet->empty()) {
+        //errs() << "Src: " << *Src << "\n";
+   	    for(const auto &Pair : *CurWorkSet) {
+		  Src->DerefLevel = Pair.second;
+		  auto ExtendedAlias = Pair.first;
+
+   	      auto Attr = getExternallyVisibleAttrs(AMap.getAttrs(ExtendedAlias));
+   	      if (Attr.any())
+   	        ExtAttributes.push_back(ExternalAttribute{*Src, Attr});
+   	   
+          for (const auto &InnerMapping : RevReachMap.reachableValueAliases(ExtendedAlias)) {
+   	        auto States = InnerMapping.second;
+   	        auto Alias = InnerMapping.first;
+            // If Src is a param/return value, we get a same-level assignment.
+            if (auto Dst = getInterfaceValue(Alias, Fn, RetVals, VAArgs)) {
+               
+              // This may happen if both Dst and Src are return values
+              if (*Dst == *Src)
+                continue;
+              if (hasReadOnlyState(States))
+                ExtRelations.push_back(ExternalRelation{*Dst, *Src, UnknownOffset});
+		  	  if (hasWriteOnlyState(States) || hasReadWriteState(States))
+                ExtRelations.push_back(ExternalRelation{*Src, *Dst, UnknownOffset});			
+            } 
+			else if (hasReadOrWriteState(States)) {
+			  unsigned NewSrcLevel = DepthMap[SrcVal] + 1;
+			  unsigned NewAliasLevel = NewSrcLevel - Src->DerefLevel + Alias.DerefLevel;
+
+			  while(NewAliasLevel <= DepthMap[Alias.Val] &&
+					NewSrcLevel <= MaxLevel) {
+		        NextWorkSet->insert(std::make_pair(
+					InstantiatedValue{Alias.Val, NewAliasLevel},
+					NewSrcLevel
+				));
+				NewSrcLevel ++;
+				NewAliasLevel ++;
+			  } 
+		    }
+		  }
+        }          
+        
+		std::swap(CurWorkSet,NextWorkSet);
+		NextWorkSet->clear(); 
+	    Src->DerefLevel++;
+	  }
+    } 
+  }
+}
+
 static void populateExternalRelations(
     SmallVectorImpl<ExternalRelation> &ExtRelations, const Function &Fn,
-    const SmallVectorImpl<Value *> &RetVals, const SmallVectorImpl<Value *> &GlobalVars, 
-	const SmallVectorImpl<Value *> &VAArgs, const ReachabilitySet &RevReachSet) {
+    const SmallVectorImpl<Value *> &RetVals, const SmallVectorImpl<Value *> &VAArgs, 
+	const ValueReachMap &RevReachMap) {
   // If a function only returns one of its argument X, then X will be both an
   // argument and a return value at the same time. This is an edge case that
   // needs special handling here.
@@ -510,17 +611,7 @@ static void populateExternalRelations(
       ExtRelations.push_back(ExternalRelation{ArgVal, RetVal, 0});
   }
  }
-  
-  //the case where the function returns a global variable
-  for (auto &Val: RetVals){
-    auto Pos = std::lower_bound(GlobalVars.begin(), GlobalVars.end(), Val);
-    if(Pos != GlobalVars.end()) {
-	  unsigned GlobalIndex = 2 + Fn.arg_size() + std::distance(GlobalVars.begin(), Pos);
-	  auto GlobalVar = InterfaceValue{GlobalIndex, 0};
-	  auto RetVal = InterfaceValue{0, 0}; 
-	  ExtRelations.push_back(ExternalRelation{GlobalVar, RetVal, 0});
-	}	
-  }
+
   // Below is the core summary construction logic.
   // A naive solution of adding only the value aliases that are parameters or
   // return values in ReachSet to the summary won't work: It is possible that a
@@ -536,12 +627,12 @@ static void populateExternalRelations(
   // need to add summary edges from the writes to the reads.
 
 
-  DenseMap<Value *, ValueSummary> ValueMap;
-  for (const auto &OuterMapping : RevReachSet.value_mappings()) {
-    if (auto Src = getInterfaceValue(OuterMapping.first, Fn, RetVals, GlobalVars, VAArgs)) {
+  //DenseMap<Value *, ValueSummary> ValueMap;
+  for (const auto &OuterMapping : RevReachMap) {
+    if (auto Src = getInterfaceValue(OuterMapping.first, Fn, RetVals, VAArgs)) {
       for (const auto &InnerMapping : OuterMapping.second) {
         // If Src is a param/return value, we get a same-level assignment.
-        if (auto Dst = getInterfaceValue(InnerMapping.first, Fn, RetVals, GlobalVars, VAArgs)) {
+        if (auto Dst = getInterfaceValue(InnerMapping.first, Fn, RetVals, VAArgs)) {
           
           // This may happen if both Dst and Src are return values
           if (*Dst == *Src)
@@ -549,12 +640,8 @@ static void populateExternalRelations(
 
           if (hasReadOnlyState(InnerMapping.second))
             ExtRelations.push_back(ExternalRelation{*Dst, *Src, UnknownOffset});
-          //if (hasWriteOnlyState(InnerMapping.second))
-          //  ExtRelations.push_back(ExternalRelation{*Src, *Dst, UnknownOffset});				
-		  //ReadWrite flow between interface vals could cause memAlias on higher deref levels
-          if (hasReadWriteState(InnerMapping.second))
-            ExtRelations.push_back(ExternalRelation{*Dst, *Src, UnknownOffset});
-
+          if (hasWriteOnlyState(InnerMapping.second) || hasReadWriteState(InnerMapping.second))
+            ExtRelations.push_back(ExternalRelation{*Src, *Dst, UnknownOffset});				
         } else {
 		  //growing dereflevels of nodes downwards during propagation replaces this part
 
@@ -606,9 +693,10 @@ static void populateExternalRelations(
 
 static void populateExternalAttributes(
     SmallVectorImpl<ExternalAttribute> &ExtAttributes, const Function &Fn,
-    const SmallVectorImpl<Value *> &RetVals, const SmallVectorImpl<Value *> &GlobalVars, const SmallVectorImpl<Value *> &VAArgs, const AliasAttrMap &AMap) {
+    const SmallVectorImpl<Value *> &RetVals, const SmallVectorImpl<Value *> &VAArgs, 
+    const AliasAttrMap &AMap) {
   for (const auto &Mapping : AMap.mappings()) {
-    if (auto IVal = getInterfaceValue(Mapping.first, Fn, RetVals, GlobalVars, VAArgs)) {
+    if (auto IVal = getInterfaceValue(Mapping.first, Fn, RetVals, VAArgs)) {
       auto Attr = getExternallyVisibleAttrs(Mapping.second);
       if (Attr.any())
         ExtAttributes.push_back(ExternalAttribute{*IVal, Attr});
@@ -616,7 +704,7 @@ static void populateExternalAttributes(
   }
 }
 
-TaintedSet CFLAndersTaintResult::FunctionInfo::propagateTaintSources(const TaintedSet &TaintSources) {
+TaintedSet CFLAndersTaintResult::FunctionInfo::propagateExternalTaint(const TaintedSet &TaintSources) {
 	TaintedSet NewTaint;
 	for(auto &Source: TaintSources) {
 		if(TaintedVals.insert(Source).second) {
@@ -624,12 +712,10 @@ TaintedSet CFLAndersTaintResult::FunctionInfo::propagateTaintSources(const Taint
 			//errs() << "external taint source " << Source << "\n";
 		}
 
-		for(auto &Mapping: RevReachSet.reachableValueAliases(Source)) {
-			if(hasNonFlowFromReadOnlyState(Mapping.second)) {
-				if(TaintedVals.insert(Mapping.first).second) {			
-					NewTaint.insert(Mapping.first);
-				    //errs() << "nonread alias of taint source " << Mapping.first << "\n";
-				}
+		for(auto &Mapping: RevReachMap.reachableValueAliases(Source)) {
+			if(TaintedVals.insert(Mapping.first).second) {			
+				NewTaint.insert(Mapping.first);
+				//errs() << "nonread alias of taint source " << Mapping.first << "\n";
 			}
 		}
 	}
@@ -638,13 +724,13 @@ TaintedSet CFLAndersTaintResult::FunctionInfo::propagateTaintSources(const Taint
 
 CFLAndersTaintResult::FunctionInfo::FunctionInfo(
     const Function &Fn, const SmallVector<Value *, 4> &RetVals, 
-    const SmallVector<Value *, 4> &GlobalVars, const SmallVector<Value *, 4> &VAArgs, 
-    const ReachabilitySet &RevReachSet, const AliasAttrMap &AMap, 
-    const TaintedSet &TaintedVals): TaintedVals(TaintedVals), RevReachSet(RevReachSet){
+    const SmallVector<Value *, 4> &VAArgs, const ValueReachMap &RevReachMap, 
+    const AliasAttrMap &AMap, const TaintedSet &TaintedVals): TaintedVals(TaintedVals), RevReachMap(RevReachMap) {
   populateAttrMap(AttrMap, AMap);
-  populateExternalAttributes(Summary.RetParamAttributes, Fn, RetVals, GlobalVars, VAArgs, AMap);
-  populateAliasMap(AliasMap, RevReachSet);
-  populateExternalRelations(Summary.RetParamRelations, Fn, RetVals, GlobalVars, VAArgs, RevReachSet);
+  //populateExternalAttributes(Summary.RetParamAttributes, Fn, RetVals, VAArgs, AMap);
+  populateAliasMap(AliasMap, RevReachMap);
+  //populateExternalRelations(Summary.RetParamRelations, Fn, RetVals, VAArgs, RevReachMap);
+  populateAliasSummary(Summary, Fn, RetVals, VAArgs, RevReachMap, AMap);
 }
 
 void CFLAndersTaintResult::propagateInterprocedural(FunctionInfo &FuncInfo) {
@@ -695,7 +781,7 @@ void CFLAndersTaintResult::propagateInterprocedural(FunctionInfo &FuncInfo) {
 			auto Itr = Cache.find(Pair.first); 
 			if(Itr != Cache.end()) {
 				auto &ToPropagate = Itr->second? *Itr->second : FuncInfo;
-				NewTaint = ToPropagate.propagateTaintSources(Pair.second);
+				NewTaint = ToPropagate.propagateExternalTaint(Pair.second);
 			}
 		}
 		WorkMap.clear();
@@ -918,14 +1004,14 @@ static void processWorkListItem(const WorkListItem &Item, CFLGraph &Graph,
   //if the one node have more levels below, then the other node 
   //should have matching levels
  
-  if(ToNodeBelow && !FromNodeBelow) {
-    matchLevelsChecked(Graph, FromNode, ToNode);
-    FromNodeBelow = getNodeBelow(Graph, FromNode);
-  }
-  if(FromNodeBelow && !ToNodeBelow) {
-    matchLevelsChecked(Graph, ToNode, FromNode);
-    ToNodeBelow = getNodeBelow(Graph, ToNode);
-  }
+  //if(ToNodeBelow && !FromNodeBelow) {
+  //  matchLevelsChecked(Graph, FromNode, ToNode);
+  //  FromNodeBelow = getNodeBelow(Graph, FromNode);
+  //}
+  //if(FromNodeBelow && !ToNodeBelow) {
+  //  matchLevelsChecked(Graph, ToNode, FromNode);
+  //  ToNodeBelow = getNodeBelow(Graph, ToNode);
+  //}
   // FromNodeBelow and ToNodeBelow might still be none due to pointer level limits
   if(FromNodeBelow && ToNodeBelow && MemSet.insert(*FromNodeBelow, *ToNodeBelow)) {
     propagate(*FromNodeBelow, *ToNodeBelow, MatchState::FlowFromMemAliasNoReadWrite, 
@@ -1027,7 +1113,7 @@ static void processWorkListItem(const WorkListItem &Item, CFLGraph &Graph,
 }
 
 static AliasAttrMap buildAttrMap(const CFLGraph &Graph,
-                                 const ReachabilitySet &RevReachSet) {
+                                 const ValueReachMap &RevReachMap) {
   AliasAttrMap AttrMap;
   std::vector<InstantiatedValue> WorkList, NextList;
 
@@ -1049,10 +1135,9 @@ static AliasAttrMap buildAttrMap(const CFLGraph &Graph,
         continue;
 
       // Propagate attr on the same level
-      for (const auto &Mapping : RevReachSet.reachableValueAliases(Src)) {
+      for (const auto &Mapping : RevReachMap.reachableValueAliases(Src)) {
         auto Dst = Mapping.first;
-		auto Attr = hasNonFlowFromReadOnlyState(Mapping.second)? SrcAttr : maskTaintedAttr(SrcAttr);
-        if (AttrMap.add(Dst, Attr)) {
+        if (AttrMap.add(Dst, SrcAttr)) {
           NextList.push_back(Dst);
 		}
       }
@@ -1097,17 +1182,9 @@ static TaintedSet buildTaintedVals(const CFLGraph &Graph,
 
 CFLAndersTaintResult::FunctionInfo
 CFLAndersTaintResult::buildInfoFrom(const Function &Fn) {
-  if(!GlobalVars) {
-	GlobalVars = SmallVector<Value *, 4>();
-  
-    // Cast away the constness here due to GlobalVars' requirement
-	for (auto &GVar: const_cast<Function &>(Fn).getParent()->getGlobalList())
-		GlobalVars->push_back(&GVar);
-    sort(*GlobalVars);
-  }
 
   CFLGraphBuilder<CFLAndersTaintResult> GraphBuilder(
-      *this, TLI, *GlobalVars,
+      *this, TLI,
       // Cast away the constness here due to GraphBuilder's API requirement
       const_cast<Function &>(Fn)
     );
@@ -1128,16 +1205,16 @@ CFLAndersTaintResult::buildInfoFrom(const Function &Fn) {
     NextList.clear();
   }
 
-  ReachabilitySet RevReachSet = ReachSet.getRevReachSet();
+  const ValueReachMap RevReachMap = ReachSet.getRevReachMap();
   // Now that we have all the reachability info, propagate AliasAttrs according
   // to it
-  auto IValueAttrMap = buildAttrMap(Graph, RevReachSet);
+  auto IValueAttrMap = buildAttrMap(Graph, RevReachMap);
   auto TaintedVals = buildTaintedVals(Graph, IValueAttrMap);
 
-  auto FuncInfo = FunctionInfo(Fn, GraphBuilder.getReturnValues(), *GlobalVars, GraphBuilder.getVAArgs(), RevReachSet, std::move(IValueAttrMap), std::move(TaintedVals));
+  auto FuncInfo = FunctionInfo(Fn, GraphBuilder.getReturnValues(), GraphBuilder.getVAArgs(), RevReachMap, std::move(IValueAttrMap), std::move(TaintedVals));
 
-  FuncInfo.propagateTaintSources(TaintedGlobalVars);
-  FuncInfo.propagateTaintSources(TaintedFormalArgs[&Fn]);
+  FuncInfo.propagateExternalTaint(TaintedGlobalVars);
+  FuncInfo.propagateExternalTaint(TaintedFormalArgs[&Fn]);
   propagateInterprocedural(FuncInfo) ;
   return FuncInfo;
 }
@@ -1152,8 +1229,8 @@ void CFLAndersTaintResult::scan(const Function &Fn) {
   // may get evaluated after operator[], potentially triggering a DenseMap
   // resize and invalidating the reference returned by operator[]  
 
-  //errs() << "------------------------------------------------------\n";
-  //errs() << "building info for " << getDemangledName(Fn) << "\n\n";
+  errs() << "------------------------------------------------------\n";
+  errs() << "building info for " << getDemangledName(Fn) << "\n\n";
  
   auto FunInfo = buildInfoFrom(Fn);
   Cache[&Fn] = std::move(FunInfo);
