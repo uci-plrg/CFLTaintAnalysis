@@ -49,6 +49,12 @@ using namespace PatternMatch;
 /// As a result, we expect the said CFL-AA to expose a getSummary() public
 /// member function that takes a Function& and returns the corresponding summary
 /// as a const AliasSummary*.
+
+struct InterfaceSrcs {
+  SmallVector<Value *, 4> RetVals;
+  SmallVector<Value *, 4> VAArgs;
+};
+
 template <typename CFLAA> class CFLGraphBuilder {
   // Input of the builder
   CFLAA &Analysis;
@@ -58,8 +64,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
   // Output of the builder
   CFLGraph Graph;
-  SmallVector<Value *, 4> ReturnedValues;
-  SmallVector<Value *, 4> VAArgs;
+  InterfaceSrcs ISrcs;
 
   // Helper class
   /// Gets the edges our graph should have, based on an Instruction*
@@ -72,8 +77,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
 
     CFLGraph &Graph;
-    SmallVectorImpl<Value *> &ReturnValues;
-	SmallVector<Value *, 4> &VAArgs;
+    InterfaceSrcs &ISrcs;
 
     static bool hasUsefulEdges(ConstantExpr *CE) {
       // ConstantExpr doesn't have terminators, invokes, or fences, so only
@@ -182,7 +186,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
   public:
     GetEdgesVisitor(CFLGraphBuilder &Builder, const DataLayout &DL)
-        : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), IsVarArg(Builder.IsVarArg), Fn(Builder.Fn), Graph(Builder.Graph), ReturnValues(Builder.ReturnedValues), VAArgs(Builder.VAArgs){}
+        : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), IsVarArg(Builder.IsVarArg), Fn(Builder.Fn), Graph(Builder.Graph), ISrcs(Builder.ISrcs){}
 
     void visitInstruction(Instruction &) {
       llvm_unreachable("Unsupported instruction encountered");
@@ -197,7 +201,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 		    if(!GVal->isConstant())
 			  Attr = getAttrEscaped();
 		  addNode(RetVal, Attr);
-          ReturnValues.push_back(RetVal);
+          ISrcs.RetVals.push_back(RetVal);
         }
       }
     }
@@ -309,16 +313,13 @@ template <typename CFLAA> class CFLGraphBuilder {
 		}
       }
 
-      //errs() << "------------------------------------------------------\n";
-      //errs() << "back to building info for " << getDemangledName(this->Fn) << "\n\n";
-
       for (auto *Fn : Fns) {
         auto Summary = AA.getSummary(*Fn);
         assert(Summary != nullptr);
 	    
 		if(Fn->isVarArg() && CS.arg_size() > Fn->arg_size() + 1) {
 		   //Currently variadic arguments cannot be modelled precisely due to
-		   //bitcasting while retrieving var args changeing the maximum pointer level
+		   //bitcasts while retrieving var args changing the maximum pointer level
 		   for (auto i = Fn->arg_size(); i != CS.arg_size(); i++) {
 			auto Arg = CS.getArgument(i);
 			if(Arg->getType()->isPointerTy()) {
@@ -377,7 +378,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 	  
       if(IsVarArg &&
 		 isa<VAStartInst>(Inst)) {
-		VAArgs.push_back(CS.getArgOperand(0));
+		 ISrcs.VAArgs.push_back(CS.getArgOperand(0));
 		return;
       }
 
@@ -606,13 +607,11 @@ public:
   }
 
   CFLGraph &getCFLGraph() { return Graph; }
-  const SmallVector<Value *, 4> &getReturnValues() const {
-    return ReturnedValues;
+
+  const InterfaceSrcs &getInterfaceSrcs() const {
+    return ISrcs;
   }
 
-  const SmallVector<Value *, 4> &getVAArgs() const {
-    return VAArgs;
-  }
 
 };
 

@@ -64,9 +64,11 @@ public:
 
   const Optional<std::vector<const Value *>> allValueAliases(const Value *);  
 
-  const Optional<DenseSet<const Value *>> taintedVals(const Function&);
+  Optional<DenseSet<Value *>> taintedVals(const Function &Fn);
   
-  const DenseMap<const Function*, DenseSet<const Value *>> taintedValsInReachableFuncs(const Function &Fn); 
+  DenseMap<const Function*, DenseSet<Value *>> taintedValsInReachableFuncs(const Function &Fn); 
+
+  DenseSet<Value *> taintedGlobalVars(); 
 
 private:
   /// Ensures that the given function is available in the cache.
@@ -87,15 +89,14 @@ private:
   /// that simply has empty sets.
   DenseMap<const Function *, Optional<FunctionInfo>> Cache;
 
-  //Save all globals tainted
+  //Save all tainted globals
   TaintedSet TaintedGlobalVars;
 
-  //Save for each function all formal arguments tainted
-  DenseMap<const Function *, TaintedSet> TaintedFormalArgs;
+  //Save for each function all formal arguments and globals tainted
+  DenseMap<const Function *, TaintedSet> TaintedFuncArgsGlobals;
 
   void propagateInterprocedural(FunctionInfo &); 
   
-//to propagate taint to other functions where the globals is used  
   std::forward_list<cflta::FunctionHandle<CFLAndersTaintResult>> Handles;
 };
 
