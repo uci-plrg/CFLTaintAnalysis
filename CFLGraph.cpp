@@ -13,6 +13,7 @@
 
 #include "CFLGraph.h"
 #include "CFLTaintAnalysisUtils.h"
+#include "PMConfig.h"
 
 namespace llvm {
 namespace cflta {
@@ -62,19 +63,17 @@ CFLGraph::CFLGraph(const TargetLibraryInfo& TLI) : TLI(TLI){}
 	return Itr->second.getNumLevels() - 1;
   }
 
-  void CFLGraph::addLevel(Node N, unsigned Level) {
-		
-	//unsigned MaxLevels = maxDerefLevel(N.Val);
-	
-	// if not limited by max level, 
-	// deref levels may grow infinitely due to getelementptr and bitcast
-	//if (N.DerefLevel + 1 <MaxLevels) {
-		addNode(Node{N.Val, Level}); 
-	//}	
-  }
-
   bool CFLGraph::addNode(Node N, AliasAttrs Attr)  {
     assert(N.Val != nullptr);
+
+	if(auto PtrTy = dyn_cast<PointerType>(N.Val->getType())) {
+	  auto ElementTy = PtrTy->getPointerElementType();
+	  if(auto StTy = dyn_cast<StructType>(ElementTy)) {
+		if(StTy->hasName() && is_contained(PMStructTypes, StTy->getName().str()))
+		 Attr |= getAttrTainted();
+	  }
+	}
+
     auto &ValInfo = ValueImpls[N.Val];
     auto Changed = ValInfo.addNodeToLevel(N.DerefLevel);
     auto &NodeInfo = ValInfo.getNodeInfoAtLevel(N.DerefLevel);
@@ -85,7 +84,7 @@ CFLGraph::CFLGraph(const TargetLibraryInfo& TLI) : TLI(TLI){}
 	//if(!isValueImmutable(N.Val) && hasUnknownAttr(Attr))
     //  errs() << " add unknown attr to mutable " << N << "\n";
 	//if(!isValueImmutable(N.Val) && hasEscapedAttr(Attr))
-	//  errs() << " add escpaed attr to mutable " << N << "\n";
+	//  errs() << " add escaped attr to mutable " << N << "\n";
 
     return Changed;
   }
@@ -100,7 +99,7 @@ CFLGraph::CFLGraph(const TargetLibraryInfo& TLI) : TLI(TLI){}
 	//if(!isValueImmutable(N.Val) && hasUnknownAttr(Attr))
     //  errs() << " add unknown attr to mutable " << N << "\n";
 	//if(!isValueImmutable(N.Val) && hasEscapedAttr(Attr))
-	//  errs() << " add escpaed attr to mutable " << N << "\n";
+	//  errs() << " add escaped attr to mutable " << N << "\n";
   }
 
   void CFLGraph::addEdge(Node From, Node To, int64_t Offset) {
@@ -112,6 +111,18 @@ CFLGraph::CFLGraph(const TargetLibraryInfo& TLI) : TLI(TLI){}
     FromInfo->Edges.push_back(Edge{To, Offset});
     ToInfo->ReverseEdges.push_back(Edge{From, Offset});
 
+  }
+
+  CFLGraph::const_edge_iterator CFLGraph::getElementPtrs(Value *Val) const {
+	auto *Info = getNode(InstantiatedValue{Val, 0});
+    assert(Info != nullptr);
+    return std::find_if(Info->Edges.begin(), Info->Edges.end(), [](Edge E) {return E.Offset != 0;});
+  }
+
+  CFLGraph::const_edge_iterator CFLGraph::getRevElementPTrs(Value *Val) const {
+	auto *Info = getNode(InstantiatedValue{Val, 0});
+    assert(Info != nullptr);
+    return std::find_if(Info->ReverseEdges.begin(), Info->ReverseEdges.end(), [](Edge E) {return E.Offset != 0;});
   }
 
   const CFLGraph::NodeInfo *CFLGraph::getNode(Node N) const {

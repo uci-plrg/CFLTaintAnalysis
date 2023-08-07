@@ -53,6 +53,7 @@ using namespace PatternMatch;
 struct InterfaceSrcs {
   SmallVector<Value *, 4> RetVals;
   SmallVector<Value *, 4> VAArgs;
+  SmallVector<Value *, 4> CallsiteArgs;
 };
 
 template <typename CFLAA> class CFLGraphBuilder {
@@ -60,7 +61,7 @@ template <typename CFLAA> class CFLGraphBuilder {
   CFLAA &Analysis;
   const TargetLibraryInfo &TLI;
   const bool IsVarArg;
-  const Function& Fn;
+  const Function& CurFn;
 
   // Output of the builder
   CFLGraph Graph;
@@ -73,7 +74,7 @@ template <typename CFLAA> class CFLGraphBuilder {
     const DataLayout &DL;
     const TargetLibraryInfo &TLI;
     const bool IsVarArg;
-    const Function& Fn;
+    const Function& CurFn;
 
 
     CFLGraph &Graph;
@@ -158,6 +159,39 @@ template <typename CFLAA> class CFLGraphBuilder {
 		}
 	}
 
+	bool handlePtrToInt(Value *Val) {
+		if (!Val->hasOneUse())
+		  return false;
+		auto User1 = *Val->user_begin();
+		if (!User1->hasOneUse())
+		  return false;
+		User *User2 = *User1->user_begin();
+		Value *Src;
+		const Value *Val2;
+		if (auto Op = dyn_cast<Operator>(User2)) {
+		  if (Op->getOpcode() == Instruction::IntToPtr &&
+			match(Op->getOperand(0), m_Add(m_Specific(Val), m_Value())) &&
+			match(Val2, m_PtrToInt(m_Value(Src)))) {
+			Graph.addNode(InstantiatedValue{Src, 0});
+			Graph.addNode(InstantiatedValue{User2, 0});
+		    Graph.addEdge(InstantiatedValue{Src, 0}, InstantiatedValue{User2, 0}, UnknownOffset);
+		    return true;	
+		  }
+		}
+		return false;
+	}
+
+	bool handleIntToPtr(Value *Val) {
+		const Value *Src;
+		if (auto Op = dyn_cast<Operator>(Val)) {
+		  if (Op->getOpcode() == Instruction::IntToPtr &&
+			  match(Op->getOperand(0), m_Add(m_PtrToInt(m_Value(Src)), m_Value()))) {
+		    return true;
+		  }
+		}
+		return false;
+	}
+
     void addDerefEdge(Value *From, Value *To, bool IsRead) {
       assert(From != nullptr && To != nullptr);
       // FIXME: This is subtly broken, due to how we model some instructions
@@ -167,7 +201,7 @@ template <typename CFLAA> class CFLGraphBuilder {
       // addAssignEdge seems to have a similar issue with insertvalue, etc.
       if (!From->getType()->isPointerTy() || !To->getType()->isPointerTy()) {
 		if(!IsRead)
-			handleCastToIntAndStore(From, To);
+		  handleCastToIntAndStore(From, To);
         return;
 	  }
       addNode(From);
@@ -186,7 +220,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
   public:
     GetEdgesVisitor(CFLGraphBuilder &Builder, const DataLayout &DL)
-        : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), IsVarArg(Builder.IsVarArg), Fn(Builder.Fn), Graph(Builder.Graph), ISrcs(Builder.ISrcs){}
+        : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), IsVarArg(Builder.IsVarArg), CurFn(Builder.CurFn), Graph(Builder.Graph), ISrcs(Builder.ISrcs){}
 
     void visitInstruction(Instruction &) {
       llvm_unreachable("Unsupported instruction encountered");
@@ -198,8 +232,9 @@ template <typename CFLAA> class CFLGraphBuilder {
 		  //currently returned global vars are not modelled due to the cost of searching for the resulting aliases
 		  auto Attr = getAttrNone();
 		  if(auto GVal = dyn_cast<GlobalVariable>(RetVal))
-		    if(!GVal->isConstant())
+		    if(!GVal->isConstant()) {
 			  Attr = getAttrEscaped();
+			}
 		  addNode(RetVal, Attr);
           ISrcs.RetVals.push_back(RetVal);
         }
@@ -207,13 +242,17 @@ template <typename CFLAA> class CFLGraphBuilder {
     }
 
     void visitPtrToIntInst(PtrToIntInst &Inst) {
+	  if(handlePtrToInt(&Inst))
+		return;
       auto *Ptr = Inst.getOperand(0);
-      addNode(Ptr, getAttrEscaped());
+      addNode(Ptr/*, getAttrEscaped()*/);
     }
 
     void visitIntToPtrInst(IntToPtrInst &Inst) {
+	  if(handleIntToPtr(&Inst))
+		return;
       auto *Ptr = &Inst;
-      addNode(Ptr, getAttrUnknown());
+      addNode(Ptr/*, getAttrUnknown()*/);
     }
 
     void visitCastInst(CastInst &Inst) {
@@ -247,10 +286,10 @@ template <typename CFLAA> class CFLGraphBuilder {
 
     void visitGEP(GEPOperator &GEPOp) {
       uint64_t Offset = UnknownOffset;
-      APInt APOffset(DL.getPointerSizeInBits(GEPOp.getPointerAddressSpace()),
-                     0);
-      if (GEPOp.accumulateConstantOffset(DL, APOffset))
-        Offset = APOffset.getSExtValue();
+      //APInt APOffset(DL.getPointerSizeInBits(GEPOp.getPointerAddressSpace()),
+      //               0);
+      //if (GEPOp.accumulateConstantOffset(DL, APOffset))
+      //  Offset = APOffset.getSExtValue();
 
       auto *Op = GEPOp.getPointerOperand();
       addAssignEdge(Op, &GEPOp, Offset);
@@ -318,14 +357,15 @@ template <typename CFLAA> class CFLGraphBuilder {
         assert(Summary != nullptr);
 	    
 		if(Fn->isVarArg() && CS.arg_size() > Fn->arg_size() + 1) {
+		   //errs() << "call to vararg function: " << *CS.getInstruction() << "\n";
 		   //Currently variadic arguments cannot be modelled precisely due to
 		   //bitcasts while retrieving var args changing the maximum pointer level
 		   for (auto i = Fn->arg_size(); i != CS.arg_size(); i++) {
 			auto Arg = CS.getArgument(i);
 			if(Arg->getType()->isPointerTy()) {
-			  Graph.addNode(InstantiatedValue{Arg, 1});
-			  Graph.addAttr(InstantiatedValue{Arg, 0}, getAttrEscaped());
-              Graph.addAttr(InstantiatedValue{Arg, 1}, getAttrUnknown());
+			  //Graph.addAttr(InstantiatedValue{Arg, 0}, getAttrEscaped());
+			  //if(Graph.getCurMaxLevel(Arg) > 0)
+			  //  Graph.addAttr(InstantiatedValue{Arg, 1}, getAttrUnknown());
 			}
 		   }
 		   //unsigned VAStart = Fn->arg_size();
@@ -359,7 +399,8 @@ template <typename CFLAA> class CFLGraphBuilder {
             Graph.addNode(IAttr->IValue, IAttr->Attr);
         }
       }
-
+	  //errs() << "------------------------------------------------------\n";
+	  //errs() << "back to building " << getDemangledName(CurFn) << "\n\n";
       return true;
     }
 
@@ -371,6 +412,7 @@ template <typename CFLAA> class CFLGraphBuilder {
       for (Value *V : CS.args()) {
         if (V->getType()->isPointerTy()) {
           addNode(V);
+		  ISrcs.CallsiteArgs.push_back(V);
 		}
 	  }
       if (Inst->getType()->isPointerTy())
@@ -394,9 +436,9 @@ template <typename CFLAA> class CFLGraphBuilder {
 	  }
 
 	  //errs() << "unhandled call instruction  " << *Inst << "\n"; 
-      if (auto F = CS.getCalledFunction()) {
-        //errs() << "unhandled call to " << getDemangledName(*F) << "\n";
-	  }
+      //if (auto F = CS.getCalledFunction()) {
+      //  errs() << "unhandled call to " << getDemangledName(*F) << "\n";
+	  //}
 
       // Because the function is opaque, we need to note that anything
       // could have happened to the arguments (unless the function is marked
@@ -406,19 +448,20 @@ template <typename CFLAA> class CFLGraphBuilder {
         for (Value *V : CS.args()) {
           if (V->getType()->isPointerTy()) {
             // The argument itself escapes.
-            Graph.addAttr(InstantiatedValue{V, 0}, getAttrEscaped());
+            //Graph.addAttr(InstantiatedValue{V, 0}, getAttrEscaped());
             // The fate of argument memory is unknown. Note that since
             // AliasAttrs is transitive with respect to dereference, we only
             // need to specify it for the first-level memory.
-			if(Graph.getCurMaxLevel(V) > 0)
-				Graph.addAttr(InstantiatedValue{V, 1}, getAttrUnknown());
+			//if(Graph.getCurMaxLevel(V) > 0)
+			//`	Graph.addAttr(InstantiatedValue{V, 1}/*, getAttrUnknown()*/);
           }
         }
 
       if (Inst->getType()->isPointerTy()) {
 		//Return values from unknown functions are unknown
-		Graph.addAttr(InstantiatedValue{Inst, 0}, getAttrUnknown());
-        //auto *Fn = CS.getCalledFunction();
+		//Graph.addAttr(InstantiatedValue{Inst, 0}, getAttrUnknown());
+        
+		//auto *Fn = CS.getCalledFunction();
         //if (Fn == nullptr || !Fn->returnDoesNotAlias())
           // No need to call addNode() since we've added Inst at the
           // beginning of this function and we know it is not a global.
@@ -479,12 +522,16 @@ template <typename CFLAA> class CFLGraphBuilder {
       }
 
       case Instruction::PtrToInt: {
-        addNode(CE->getOperand(0), getAttrEscaped());
+		if(handlePtrToInt(CE))
+		  return;
+        addNode(CE->getOperand(0)/*, getAttrEscaped()*/);
         break;
       }
 
       case Instruction::IntToPtr: {
-        addNode(CE, getAttrUnknown());
+		if(handleIntToPtr(CE))
+		  return;  
+        addNode(CE/*, getAttrUnknown()*/);
         break;
       }
 
@@ -602,7 +649,7 @@ template <typename CFLAA> class CFLGraphBuilder {
   }
 
 public:
-  CFLGraphBuilder(CFLAA &Analysis, const TargetLibraryInfo &TLI, Function &Fn) : Analysis(Analysis), TLI(TLI), IsVarArg(Fn.isVarArg()), Fn(Fn), Graph(TLI) {
+  CFLGraphBuilder(CFLAA &Analysis, const TargetLibraryInfo &TLI, Function &Fn) : Analysis(Analysis), TLI(TLI), IsVarArg(Fn.isVarArg()), CurFn(Fn), Graph(TLI) {
     buildGraphFrom(Fn);
   }
 

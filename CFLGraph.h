@@ -32,6 +32,7 @@ namespace cflta {
 /// references/dereferences are not explicitly stored in the graph: we
 /// implicitly assume that for each //node (X, I) it has a dereference edge to (X,
 /// I+1) and a reference edge to (X, I-1).
+
 class CFLGraph {
 private:
   const TargetLibraryInfo TLI;
@@ -53,12 +54,12 @@ public:
     AliasAttrs Attr;
   };
 
-
   class ValueInfo {
     std::vector<NodeInfo> Levels;
 
   public:
-    bool addNodeToLevel(unsigned Level);
+    
+	bool addNodeToLevel(unsigned Level);
 
     NodeInfo &getNodeInfoAtLevel(unsigned Level);
 
@@ -77,17 +78,21 @@ private:
 
 public:
   using const_value_iterator = ValueMap::const_iterator;
+
+  using const_edge_iterator = EdgeList::const_iterator;
  
   unsigned getCurMaxLevel(const Value* Val) const; 
   
-  void addLevel(Node N, unsigned Level);
-
   bool addNode(Node N, AliasAttrs Attr = AliasAttrs());
 
   void addAttr(Node N, AliasAttrs Attr);
 
   void addEdge(Node From, Node To, int64_t Offset = 0);
- 
+
+  const_edge_iterator getElementPtrs(Value *Val) const;
+
+  const_edge_iterator getRevElementPTrs(Value *Val) const;
+
   const NodeInfo *getNode(Node N) const;  
 
   AliasAttrs attrFor(Node N) const;
