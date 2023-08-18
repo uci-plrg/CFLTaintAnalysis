@@ -50,10 +50,9 @@ using namespace PatternMatch;
 /// member function that takes a Function& and returns the corresponding summary
 /// as a const AliasSummary*.
 
-struct InterfaceSrcs {
+struct ExternalVals {
   SmallVector<Value *, 4> RetVals;
   SmallVector<Value *, 4> VAArgs;
-  SmallVector<Value *, 4> CallsiteArgs;
 };
 
 template <typename CFLAA> class CFLGraphBuilder {
@@ -61,11 +60,11 @@ template <typename CFLAA> class CFLGraphBuilder {
   CFLAA &Analysis;
   const TargetLibraryInfo &TLI;
   const bool IsVarArg;
-  const Function& CurFn;
+  const Function &CurFn;
 
   // Output of the builder
   CFLGraph Graph;
-  InterfaceSrcs ISrcs;
+  ExternalVals ExtVals;
 
   // Helper class
   /// Gets the edges our graph should have, based on an Instruction*
@@ -78,7 +77,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
 
     CFLGraph &Graph;
-    InterfaceSrcs &ISrcs;
+    ExternalVals &ExtVals;
 
     static bool hasUsefulEdges(ConstantExpr *CE) {
       // ConstantExpr doesn't have terminators, invokes, or fences, so only
@@ -110,7 +109,6 @@ template <typename CFLAA> class CFLGraphBuilder {
                           getGlobalOrArgAttrFromValue(*GVal))) {
           //Graph.addNode(InstantiatedValue{GVal, 1}, getAttrUnknown());
 		  auto IV = InstantiatedValue{GVal, 1};
-		  Graph.addNode(IV);
 		  if (auto GVar = dyn_cast<GlobalVariable>(GVal)) {
 		    if (!GVar->hasInitializer() || !GVar->hasDefinitiveInitializer())
 			  Graph.addNode(IV, getAttrUnknown());
@@ -159,37 +157,33 @@ template <typename CFLAA> class CFLGraphBuilder {
 		}
 	}
 
-	bool handlePtrToInt(Value *Val) {
-		if (!Val->hasOneUse())
-		  return false;
-		auto User1 = *Val->user_begin();
-		if (!User1->hasOneUse())
-		  return false;
-		User *User2 = *User1->user_begin();
-		Value *Src;
-		const Value *Val2;
-		if (auto Op = dyn_cast<Operator>(User2)) {
-		  if (Op->getOpcode() == Instruction::IntToPtr &&
-			match(Op->getOperand(0), m_Add(m_Specific(Val), m_Value())) &&
-			match(Val2, m_PtrToInt(m_Value(Src)))) {
-			Graph.addNode(InstantiatedValue{Src, 0});
-			Graph.addNode(InstantiatedValue{User2, 0});
-		    Graph.addEdge(InstantiatedValue{Src, 0}, InstantiatedValue{User2, 0}, UnknownOffset);
-		    return true;	
-		  }
-		}
-		return false;
+	bool handlePtrToInt(PtrToIntOperator *PTI) {
+	  if (!PTI->hasOneUse())
+	    return false;
+	  auto Add = *PTI->user_begin();
+	  if (!match(Add, m_Add(m_Specific(PTI), m_Value())) || !Add->hasOneUse())
+	    return false;
+	  User *ITP = *Add->user_begin();
+	  if (auto ITPOp = dyn_cast<Operator>(ITP)) {
+	    if (ITPOp->getOpcode() == Instruction::IntToPtr) {
+	  	  auto Src = PTI->getOperand(0);
+	  	  Graph.addNode(InstantiatedValue{Src, 0});
+	  	  Graph.addNode(InstantiatedValue{ITP, 0});
+	      Graph.addEdge(InstantiatedValue{Src, 0}, InstantiatedValue{ITP, 0});
+	      return true;	
+	    }
+	  }
+	  return false;
 	}
 
-	bool handleIntToPtr(Value *Val) {
-		const Value *Src;
-		if (auto Op = dyn_cast<Operator>(Val)) {
-		  if (Op->getOpcode() == Instruction::IntToPtr &&
-			  match(Op->getOperand(0), m_Add(m_PtrToInt(m_Value(Src)), m_Value()))) {
-		    return true;
-		  }
-		}
-		return false;
+	bool handleIntToPtr(Operator *Op) {
+	  assert(Op->getOpcode() == Instruction::IntToPtr);
+      const Value *Src;
+      auto Add = Op->getOperand(0);
+	  if (match(Add, m_Add(m_PtrToInt(m_Value(Src)), m_Value())) &&
+           Src->hasOneUse() && Add->hasOneUse())
+		 return true;
+	  return false;
 	}
 
     void addDerefEdge(Value *From, Value *To, bool IsRead) {
@@ -220,7 +214,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
   public:
     GetEdgesVisitor(CFLGraphBuilder &Builder, const DataLayout &DL)
-        : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), IsVarArg(Builder.IsVarArg), CurFn(Builder.CurFn), Graph(Builder.Graph), ISrcs(Builder.ISrcs){}
+        : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), IsVarArg(Builder.IsVarArg), CurFn(Builder.CurFn), Graph(Builder.Graph), ExtVals(Builder.ExtVals){}
 
     void visitInstruction(Instruction &) {
       llvm_unreachable("Unsupported instruction encountered");
@@ -236,20 +230,22 @@ template <typename CFLAA> class CFLGraphBuilder {
 			  Attr = getAttrEscaped();
 			}
 		  addNode(RetVal, Attr);
-          ISrcs.RetVals.push_back(RetVal);
+          ExtVals.RetVals.push_back(RetVal);
         }
       }
     }
 
     void visitPtrToIntInst(PtrToIntInst &Inst) {
-	  if(handlePtrToInt(&Inst))
+	  auto PTIOp = cast<PtrToIntOperator>(&Inst);
+	  if(handlePtrToInt(PTIOp))
 		return;
       auto *Ptr = Inst.getOperand(0);
       addNode(Ptr/*, getAttrEscaped()*/);
     }
 
     void visitIntToPtrInst(IntToPtrInst &Inst) {
-	  if(handleIntToPtr(&Inst))
+      auto Op = cast<Operator>(&Inst);
+	  if(handleIntToPtr(Op))
 		return;
       auto *Ptr = &Inst;
       addNode(Ptr/*, getAttrUnknown()*/);
@@ -286,10 +282,10 @@ template <typename CFLAA> class CFLGraphBuilder {
 
     void visitGEP(GEPOperator &GEPOp) {
       uint64_t Offset = UnknownOffset;
-      //APInt APOffset(DL.getPointerSizeInBits(GEPOp.getPointerAddressSpace()),
-      //               0);
-      //if (GEPOp.accumulateConstantOffset(DL, APOffset))
-      //  Offset = APOffset.getSExtValue();
+      APInt APOffset(DL.getPointerSizeInBits(GEPOp.getPointerAddressSpace()),
+                     0);
+      if (GEPOp.accumulateConstantOffset(DL, APOffset))
+        Offset = APOffset.getSExtValue();
 
       auto *Op = GEPOp.getPointerOperand();
       addAssignEdge(Op, &GEPOp, Offset);
@@ -412,7 +408,6 @@ template <typename CFLAA> class CFLGraphBuilder {
       for (Value *V : CS.args()) {
         if (V->getType()->isPointerTy()) {
           addNode(V);
-		  ISrcs.CallsiteArgs.push_back(V);
 		}
 	  }
       if (Inst->getType()->isPointerTy())
@@ -420,7 +415,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 	  
       if(IsVarArg &&
 		 isa<VAStartInst>(Inst)) {
-		 ISrcs.VAArgs.push_back(CS.getArgOperand(0));
+		 ExtVals.VAArgs.push_back(CS.getArgOperand(0));
 		return;
       }
 
@@ -522,14 +517,16 @@ template <typename CFLAA> class CFLGraphBuilder {
       }
 
       case Instruction::PtrToInt: {
-		if(handlePtrToInt(CE))
+		auto PTIOp = cast<PtrToIntOperator>(CE);
+		if(handlePtrToInt(PTIOp))
 		  return;
         addNode(CE->getOperand(0)/*, getAttrEscaped()*/);
         break;
       }
 
       case Instruction::IntToPtr: {
-		if(handleIntToPtr(CE))
+        auto Op = cast<Operator>(CE);
+		if(handleIntToPtr(Op))
 		  return;  
         addNode(CE/*, getAttrUnknown()*/);
         break;
@@ -639,7 +636,6 @@ template <typename CFLAA> class CFLGraphBuilder {
   void buildGraphFrom(Function &Fn) {
     GetEdgesVisitor Visitor(*this, Fn.getParent()->getDataLayout());
 
-
     for (auto &Bb : Fn.getBasicBlockList())
       for (auto &Inst : Bb.getInstList())
         addInstructionToGraph(Visitor, Inst);
@@ -649,14 +645,14 @@ template <typename CFLAA> class CFLGraphBuilder {
   }
 
 public:
-  CFLGraphBuilder(CFLAA &Analysis, const TargetLibraryInfo &TLI, Function &Fn) : Analysis(Analysis), TLI(TLI), IsVarArg(Fn.isVarArg()), CurFn(Fn), Graph(TLI) {
+  CFLGraphBuilder(CFLAA &Analysis, const TargetLibraryInfo &TLI, Function &Fn) : Analysis(Analysis), TLI(TLI), IsVarArg(Fn.isVarArg()), CurFn(Fn) {
     buildGraphFrom(Fn);
   }
 
   CFLGraph &getCFLGraph() { return Graph; }
 
-  const InterfaceSrcs &getInterfaceSrcs() const {
-    return ISrcs;
+  const ExternalVals &getExternalVals() const {
+    return ExtVals;
   }
 
 

@@ -34,11 +34,9 @@ namespace cflta {
 /// I+1) and a reference edge to (X, I-1).
 
 class CFLGraph {
-private:
-  const TargetLibraryInfo TLI;
 
 public:
-  CFLGraph(const TargetLibraryInfo& TLI);
+  CFLGraph();
 
   using Node = InstantiatedValue;
 
@@ -79,8 +77,6 @@ private:
 public:
   using const_value_iterator = ValueMap::const_iterator;
 
-  using const_edge_iterator = EdgeList::const_iterator;
- 
   unsigned getCurMaxLevel(const Value* Val) const; 
   
   bool addNode(Node N, AliasAttrs Attr = AliasAttrs());
@@ -89,15 +85,13 @@ public:
 
   void addEdge(Node From, Node To, int64_t Offset = 0);
 
-  const_edge_iterator getElementPtrs(Value *Val) const;
-
-  const_edge_iterator getRevElementPTrs(Value *Val) const;
-
   const NodeInfo *getNode(Node N) const;  
 
   AliasAttrs attrFor(Node N) const;
-
+  
   iterator_range<const_value_iterator> value_mappings() const;
+  
+  void propagateLevels(); 
 };
 
 } // end namespace cflta

@@ -16,6 +16,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/ValueHandle.h"
+#include "llvm/ADT/DenseSet.h"
 
 #include <cxxabi.h>
 
@@ -55,15 +56,31 @@ static inline const Function *parentFunctionOfValue(const Value *Val) {
 }
  
 static inline unsigned maxDerefLevel(const Value* V) {
- unsigned max = 0;
- auto Type = V->getType();
- assert(Type->isPointerTy());
- Type = cast<PointerType>(Type)->getPointerElementType();
- while(auto PtrType = dyn_cast<PointerType>(Type)) {
- 	max++;
- 	Type = PtrType->getPointerElementType();
- }
- return max; 
+  DenseSet<const StructType *> Seen;
+  auto T = V->getType();
+  assert(T->isPointerTy());
+  T = cast<PointerType>(T)->getPointerElementType();
+  std::function<unsigned(const Type *)> getLevel = [&] (const Type *T) {
+    unsigned Max = 0;
+    while (auto ArType = dyn_cast<ArrayType>(T)) {
+      T = ArType->getElementType();
+    }
+    while (auto PtrType = dyn_cast<PointerType>(T)) {
+     Max++;
+  	 T = PtrType->getPointerElementType();
+    }
+    if (auto StrType = dyn_cast<StructType>(T)) {
+      if (Seen.insert(StrType).second) {
+        unsigned ChildMax = 0;
+        for (auto Element: StrType->elements()) {
+ 		  ChildMax = std::max(ChildMax, getLevel(Element));
+        }
+        Max += ChildMax;
+      }
+    }
+    return Max;
+  };
+  return getLevel(T); 
 }
 
 static inline bool isValueImmutable(const Value *V) {

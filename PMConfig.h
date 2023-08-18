@@ -10,15 +10,9 @@ static const std::string PMAllocators[] = {
 	"util_map_sync"
 }; 
 
-
 static const std::string PMAllocatorsArg7Lv1[] =  {
 	//libpmem2
 	"file_map",
 };
 
-static const std::string PMStructTypes[] = {
-	//"struct.PMEMobjpool",
-	//"struct.ulog",
-	"", 
-};
 #endif //LLVM_LIB_ANALYSIS_TAINT_KNOWN_FUNCTIONS_CONFIG_H

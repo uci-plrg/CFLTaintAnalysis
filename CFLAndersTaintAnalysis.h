@@ -34,10 +34,21 @@ class TargetLibraryInfo;
 
 using TaintedSet = DenseSet<cflta::InstantiatedValue>; 
 
+struct InterprocTaintInfo {
+  //Save all tainted globals
+  TaintedSet TaintedGlobalVars;
+
+  //Save for each function all formal arguments and globals tainted
+  DenseMap<const Function *, TaintedSet> TaintedFuncArgsGlobals;
+
+  DenseMap<const Function *, TaintedSet> collectNewTaints (const TaintedSet &);
+};
+
+
 class CFLAndersTaintResult : public AAResultBase<CFLAndersTaintResult> {
   friend AAResultBase<CFLAndersTaintResult>;
 
-  class FunctionInfo; 
+  class FunctionInfo;
 
 public:
   explicit CFLAndersTaintResult(const TargetLibraryInfo &TLI);
@@ -68,8 +79,6 @@ public:
   
   DenseMap<const Function*, DenseSet<Value *>> taintedValsInReachableFuncs(const Function &Fn); 
 
-  DenseSet<Value *> taintedGlobalVars(); 
-
 private:
   /// Ensures that the given function is available in the cache.
   /// Returns the appropriate entry from the cache.
@@ -88,14 +97,10 @@ private:
   /// have any kind of recursion, it is discernable from a function
   /// that simply has empty sets.
   DenseMap<const Function *, Optional<FunctionInfo>> Cache;
-
-  //Save all tainted globals
-  TaintedSet TaintedGlobalVars;
-
-  //Save for each function all formal arguments and globals tainted
-  DenseMap<const Function *, TaintedSet> TaintedFuncArgsGlobals;
-
-  void propagateInterprocedural(FunctionInfo &); 
+  
+  InterprocTaintInfo ITI;
+  
+  void propagateInterproc(FunctionInfo &); 
   
   std::forward_list<cflta::FunctionHandle<CFLAndersTaintResult>> Handles;
 };

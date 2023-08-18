@@ -16,7 +16,7 @@
 
 #include <algorithm>
 
-#define ALL_ALLOC_FN_PMEM 1
+//#define ALL_ALLOC_FN_PMEM 1
 
 using namespace llvm;
 using namespace llvm::cflta;
@@ -25,9 +25,11 @@ static const std::string noAliasFunctions[] = {
 	//libc functions
 	"abort",
 	"__cxa_begin_catch", 
+    "calloc",
 	"dup",
 	"gnu_dev_major",
 	"gnu_dev_minor",
+    "malloc",
 	"rand",
 	//Linux standard base functions
 	"dlopen",
