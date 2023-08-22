@@ -63,7 +63,21 @@ CFLGraph::CFLGraph() {}
 	return Itr->second.getNumLevels() - 1;
   }
 
-  bool CFLGraph::addNode(Node N, AliasAttrs Attr)  {
+
+  void CFLGraph::addTaintByAttributes(Node N, AliasAttrs Attr) {
+    if(!isValueImmutable(N.Val)) {
+      if (hasEscapedAttr(Attr)) {
+        Tainted[N].set(static_cast<uint8_t>(MatchState::FlowFromReadOnly));
+        //errs() << "add to tainted values for escaped attr " << N << "\n";
+      }
+      if (hasUnknownAttr(Attr)) {
+        Tainted[N].set(static_cast<uint8_t>(MatchState::FlowToWriteOnly));
+        //errs() << "add to tainted values for unknown attr " << N << "\n";
+      }
+    }
+  }
+
+  bool CFLGraph::addNode(Node N, AliasAttrs Attr, StateSet TaintedStates)  {
     assert(N.Val != nullptr);
 
     auto &ValInfo = ValueImpls[N.Val];
@@ -71,12 +85,9 @@ CFLGraph::CFLGraph() {}
     auto &NodeInfo = ValInfo.getNodeInfoAtLevel(N.DerefLevel);
     NodeInfo.Attr |= Attr;
     
-	//if(hasTaintedAttr(Attr))
-    //  errs() << " add tainted attr to " << N << "\n";
-	//if(!isValueImmutable(N.Val) && hasUnknownAttr(Attr))
-    //  errs() << " add unknown attr to mutable " << N << "\n";
-	//if(!isValueImmutable(N.Val) && hasEscapedAttr(Attr))
-	//  errs() << " add escaped attr to mutable " << N << "\n";
+    addTaintByAttributes(N, Attr);
+    if(TaintedStates.any())
+      Tainted.addStates(N, TaintedStates); 
 
     return Changed;
   }
@@ -86,12 +97,7 @@ CFLGraph::CFLGraph() {}
     assert(Info != nullptr);
     Info->Attr |= Attr;
 
-	//if(hasTaintedAttr(Attr))
-    //  errs() << " add tainted attr to " << N << "\n";
-	//if(!isValueImmutable(N.Val) && hasUnknownAttr(Attr))
-    //  errs() << " add unknown attr to mutable " << N << "\n";
-	//if(!isValueImmutable(N.Val) && hasEscapedAttr(Attr))
-	//  errs() << " add escaped attr to mutable " << N << "\n";
+    addTaintByAttributes(N, Attr);
   }
 
   void CFLGraph::addEdge(Node From, Node To, int64_t Offset) {
@@ -122,7 +128,10 @@ CFLGraph::CFLGraph() {}
     return make_range<const_value_iterator>(ValueImpls.begin(),
                                             ValueImpls.end());
   }
-
+  
+  const TaintedSet &CFLGraph::getTainted() const {
+    return Tainted;
+  }
 
   void CFLGraph::propagateLevels() {
     //TODO: deal with overflow

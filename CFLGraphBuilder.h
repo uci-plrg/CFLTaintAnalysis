@@ -107,7 +107,6 @@ template <typename CFLAA> class CFLGraphBuilder {
       if (auto GVal = dyn_cast<GlobalValue>(Val)) {
         if (Graph.addNode(InstantiatedValue{GVal, 0},
                           getGlobalOrArgAttrFromValue(*GVal))) {
-          //Graph.addNode(InstantiatedValue{GVal, 1}, getAttrUnknown());
 		  auto IV = InstantiatedValue{GVal, 1};
 		  if (auto GVar = dyn_cast<GlobalVariable>(GVal)) {
 		    if (!GVar->hasInitializer() || !GVar->hasDefinitiveInitializer())
@@ -393,6 +392,14 @@ template <typename CFLAA> class CFLGraphBuilder {
           auto IAttr = instantiateExternalAttribute(Attribute, CS);
           if (IAttr.hasValue())
             Graph.addNode(IAttr->IValue, IAttr->Attr);
+        }
+        auto &RetParamTaints = Summary->RetParamTaints;
+        for (auto &Taint : RetParamTaints) {
+          auto ITaint = instantiateExternalTaint(Taint, CS);
+          if (ITaint.hasValue()) {
+            Graph.addNode(ITaint->IValue, AliasAttrs(), ITaint->TaintStates);
+            //errs() << "from taint summary " << ITaint->IValue << " with " << ITaint->TaintStates.to_string() << "\n";
+          }
         }
       }
 	  //errs() << "------------------------------------------------------\n";

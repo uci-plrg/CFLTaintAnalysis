@@ -91,7 +91,6 @@
 #include <utility>
 #include <vector>
 
-//TODO: implement only searching for aliases of a set of memory locations 
 using namespace llvm;
 using namespace llvm::cflta;
 
@@ -104,39 +103,6 @@ CFLAndersTaintResult::~CFLAndersTaintResult() = default;
 
 namespace {
 
-enum class MatchState : uint8_t {
-  // The following state represents S1 in the paper.
-  FlowFromReadOnly = 0,
-  // The following two states together represent S2 in the paper.
-  // The 'NoReadWrite' suffix indicates that there exists an alias path that
-  // does not contain assignment and reverse assignment edges.
-  // The 'ReadOnly' suffix indicates that there exists an alias path that
-  // contains reverse assignment edges only.
-  FlowFromMemAliasNoReadWrite,
-  FlowFromMemAliasReadOnly,
-  // The following two states together represent S3 in the paper.
-  // The 'WriteOnly' suffix indicates that there exists an alias path that
-  // contains assignment edges only.
-  // The 'ReadWrite' suffix indicates that there exists an alias path that
-  // contains both assignment and reverse assignment edges. Note that if X and Y
-  // are reachable at 'ReadWrite' state, it does NOT mean X is both read from
-  // and written to Y. Instead, it means that a third value Z is written to both
-  // X and Y.
-  FlowToWriteOnly,
-  FlowToReadWrite,
-  // The following two states together represent S4 in the paper.
-  FlowToMemAliasWriteOnly,
-  FlowToMemAliasReadWrite,
-};
-
-raw_ostream &operator << ( raw_ostream& strm, MatchState ms )
-{
-   const std::string names[] = { "FlowFromReadOnly", "FlowFromMemAliasNoReadWrite", "FlowFromMemAliasReadOnly", "FlowToWriteOnly", "FlowToReadWrite", "FlowToMemAliasWriteOnly", "FlowToMemAliasReadWrite" };
-   return strm << names[(int)ms];
-}
-
-using StateSet = std::bitset<7>;
-
 const unsigned ReadOnlyStateMask =
     (1U << static_cast<uint8_t>(MatchState::FlowFromReadOnly)) |
     (1U << static_cast<uint8_t>(MatchState::FlowFromMemAliasReadOnly));
@@ -146,6 +112,10 @@ const unsigned WriteOnlyStateMask =
 const unsigned ReadWriteStateMask =
     (1U << static_cast<uint8_t>(MatchState::FlowToReadWrite)) |
     (1U << static_cast<uint8_t>(MatchState::FlowToMemAliasReadWrite));
+const unsigned ReadStateMask =
+    ReadOnlyStateMask | ReadWriteStateMask;    
+const unsigned WriteStateMask =
+    WriteOnlyStateMask | ReadWriteStateMask;    
 const unsigned MemStateMask =
     (1U << static_cast<uint8_t>(MatchState::FlowFromMemAliasNoReadWrite)) |
     (1U << static_cast<uint8_t>(MatchState::FlowToMemAliasReadWrite)) |
@@ -153,29 +123,111 @@ const unsigned MemStateMask =
     (1U << static_cast<uint8_t>(MatchState::FlowFromMemAliasReadOnly));
 
 
-
-static bool hasReadOnlyState(StateSet Set) {
+static inline bool hasReadOnlyState(StateSet Set) {
   return (Set & StateSet(ReadOnlyStateMask)).any();
 }
 
-static bool hasNonReadState(StateSet Set) {
-  return (Set & ~StateSet(ReadOnlyStateMask)).any();
-}
-
-static bool hasNonMemState(StateSet Set) {
-  return (Set & ~StateSet(MemStateMask)).any();
-}
-
-static bool hasWriteOnlyState(StateSet Set) {
+static inline bool hasWriteOnlyState(StateSet Set) {
   return (Set & StateSet(WriteOnlyStateMask)).any();
 }
 
-static bool hasReadWriteState(StateSet Set) {
+static inline bool hasReadWriteState(StateSet Set) {
   return (Set & StateSet(ReadWriteStateMask)).any();
 }
 
-static bool notMemAliasState(MatchState State) {
-     return (StateSet(1U << static_cast<uint8_t>(State)) & ~StateSet(MemStateMask)).any();
+static inline bool hasWriteState(StateSet Set) {
+  return (Set & StateSet(WriteStateMask)).any();
+}
+
+static inline bool hasReadState(StateSet Set) {
+  return (Set & StateSet(ReadStateMask)).any();
+}
+
+static inline bool hasNonWriteState(StateSet Set) {
+  return (Set & ~StateSet(WriteStateMask)).any();
+}
+
+static inline bool hasNonReadState(StateSet Set) {
+  return (Set & ~StateSet(ReadStateMask)).any();
+}
+
+static inline bool hasNonReadOnlyState(StateSet Set) {
+  return (Set & ~StateSet(ReadOnlyStateMask)).any();
+}
+
+static inline bool hasNonMemAliasState(StateSet Set) {
+  return (Set & ~StateSet(MemStateMask)).any();
+}
+
+static inline bool hasMemAliasWriteState(StateSet Set) {
+  return (Set & StateSet(MemStateMask) & StateSet(WriteStateMask)).any();
+}
+
+static inline bool hasMemAliasNonWriteState(StateSet Set) {
+  return (Set & StateSet(MemStateMask) & ~StateSet(WriteStateMask)).any();
+}
+
+static bool hasMemAliasNonReadState(StateSet Set) {
+  return (Set & StateSet(MemStateMask) & ~StateSet(ReadStateMask)).any();
+}
+
+static const std::string StateNames[] = { "FlowFromReadOnly", "FlowFromMemAliasNoReadWrite", "FlowFromMemAliasReadOnly", "FlowToWriteOnly", "FlowToReadWrite", "FlowToMemAliasWriteOnly", "FlowToMemAliasReadWrite" };
+
+raw_ostream &operator << ( raw_ostream& strm, MatchState ms )
+{
+   return strm << StateNames[(int)ms];
+}
+
+static inline Optional<MatchState> applyRead(MatchState State) {
+  if(hasNonWriteState(toStateSet(State)))
+    return MatchState::FlowFromReadOnly;
+  return None;
+}
+
+static inline MatchState applyWrite(MatchState State) {
+  if(hasReadState(toStateSet(State)))
+    return MatchState::FlowToReadWrite;
+  else
+    return MatchState::FlowToWriteOnly;
+}
+
+static inline Optional<MatchState> applyMemAlias(MatchState State) {
+  switch (State) {
+    case MatchState::FlowFromReadOnly:
+      return MatchState::FlowFromMemAliasReadOnly;
+    case MatchState::FlowToWriteOnly:
+      return MatchState::FlowToMemAliasWriteOnly;
+    case MatchState::FlowToReadWrite:
+      return MatchState::FlowToMemAliasReadWrite;
+    default:
+      return None;
+  }
+}
+
+static inline StateSet composeStateSets(StateSet First, StateSet Second) {
+   StateSet Res;
+
+   if (hasNonWriteState(First) && Second.test(static_cast<uint8_t>(MatchState::FlowFromReadOnly)))
+     Res.set(static_cast<uint8_t>(MatchState::FlowFromReadOnly));
+
+   if (hasNonReadState(First) && Second.test(static_cast<uint8_t>(MatchState::FlowToWriteOnly)))
+     Res.set(static_cast<uint8_t>(MatchState::FlowToWriteOnly));
+
+   if ((hasReadState(First) && Second.test(static_cast<uint8_t>(MatchState::FlowToWriteOnly))) ||
+       (hasReadOnlyState(First) && Second.test(static_cast<uint8_t>(MatchState::FlowToReadWrite))))
+     Res.set(static_cast<uint8_t>(MatchState::FlowToReadWrite));
+
+   if (First.test(static_cast<uint8_t>(MatchState::FlowFromReadOnly)) && hasMemAliasNonWriteState(Second))
+     Res.set(static_cast<uint8_t>(MatchState::FlowFromMemAliasReadOnly));
+
+   if (First.test(static_cast<uint8_t>(MatchState::FlowToWriteOnly)) && hasMemAliasNonReadState(Second))
+     Res.set(static_cast<uint8_t>(MatchState::FlowToMemAliasWriteOnly));
+
+   if ((First.test(static_cast<uint8_t>(MatchState::FlowFromReadOnly)) && hasMemAliasWriteState(Second)) ||
+       (First.test(static_cast<uint8_t>(MatchState::FlowToReadWrite)) && hasMemAliasNonReadState(Second)))
+     Res.set(static_cast<uint8_t>(MatchState::FlowToMemAliasReadWrite));
+
+   return Res;
 }
 
 // A pair that consists of a value and an offset
@@ -226,16 +278,6 @@ public:
     return make_range<ValueStateMap::const_iterator>(Itr->second.begin(),
                                                  Itr->second.end());
   }
-  
-  DenseMap<Value *, unsigned> getDepthMap() const {
-	DenseMap<Value *, unsigned> DepthMap;
-	for (auto &Mapping: *this) {
-	  auto IVal = Mapping.first;
-	  if(DepthMap[IVal.Val] < IVal.DerefLevel)
-		DepthMap[IVal.Val] = IVal.DerefLevel;
-	}
-	return DepthMap;
-  }
 };
 
 class ReachabilitySet {
@@ -266,16 +308,6 @@ public:
   iterator_range<ValueStateMap::const_iterator> reachableValueAliases(InstantiatedValue V) const {
     return ReachMap.reachableValueAliases(V);
   }
-  //iterator_range<const_valuestate_iterator>
-  //reachableValueAliases(InstantiatedValue V) const {
-  //  auto Itr = RevReachMap.find(V);
-  //  if (Itr == RevReachMap.end()) {
-  //    return make_range<ValueStateMap::const_iterator>(ValueStateMap::const_iterator(),
-  //                                                     ValueStateMap::const_iterator());
-  //  }
-  //  return make_range<ValueStateMap::const_iterator>(Itr->second.begin(),
-  //                                               Itr->second.end());
-  //}
 
   iterator_range<const_value_iterator> value_mappings() const {
     return make_range<const_value_iterator>(RevReachMap.begin(), RevReachMap.end());
@@ -438,7 +470,7 @@ public:
   FunctionInfo(const Function &, const ExternalVals&, 
 			   const ValueReachMap &, const AliasAttrMap &, 
                const TaintedSet &);
-  void propagateExternalTaint(const TaintedSet&, TaintedSet *); 
+  void propagateTaint(const TaintedSet&, TaintedSet *); 
   bool mayAlias(const Value *, LocationSize, const Value *, LocationSize) const;
 
   Optional<std::vector<const Value *>> getValueAliases(const Value *) const;
@@ -519,69 +551,6 @@ populateAliasMap(DenseMap<const Value *, std::vector<OffsetValue>> &AliasMap,
     llvm::sort(AliasList);
   }
 }
-
-static void getExtendedAliasesBelow(Value *Val, const ValueReachMap &ReachMap, DenseMap<Value *, unsigned> &DepthMap, ValueReachMap &ExtendedMap) {
-  for (unsigned Level = 0; Level <= DepthMap[Val]; Level++) {
-    auto IVal = InstantiatedValue{Val, Level};
-    for (const auto &Mapping: ReachMap.reachableValueAliases(IVal))
-      ExtendedMap[IVal].insert(Mapping);
-    for (const auto &Mapping: ExtendedMap[IVal]) {
-	  auto Alias = Mapping.first;
-	  auto MaxLevel = DepthMap[Alias.Val];
-	  for(unsigned Inc = 1; Alias.DerefLevel + Inc <= MaxLevel; Inc++) {
-		auto NewIVal = InstantiatedValue{Val, Level + Inc};
-        for (auto &Mapping2: ReachMap.reachableValueAliases(InstantiatedValue{Alias.Val, Alias.DerefLevel + Inc}))
-		 if(hasNonMemState(Mapping2.second))
-		  ExtendedMap[NewIVal].insert(Mapping2);
-	  }
-    }
-  }
-}
-
-static void getExtendedAliasesAbove(Value *Val, const ValueReachMap &ReachMap, ValueStateMap &ExtendedMap) {
-  ValueStateMap Map1, Map2;
-  ValueStateMap *WorkMap1 = &Map1, *WorkMap2 = &Map2; 
-  for (const auto &Mapping: ReachMap.reachableValueAliases(InstantiatedValue{Val, 0})) {
-	WorkMap1->insert(Mapping);
-    ExtendedMap.insert(Mapping);
-  }
-  while(!WorkMap1->empty()) { 
-    for(const auto &Mapping: *WorkMap1) {
-	  auto Alias = Mapping.first;
-	  for(unsigned Dec = 1; Dec <= Alias.DerefLevel; Dec++) {
-		for (auto &Mapping2: ReachMap.reachableValueAliases(InstantiatedValue{Alias.Val, Alias.DerefLevel - Dec})) {
-		  auto Alias2 = InstantiatedValue{Mapping2.first.Val, Mapping2.first.DerefLevel + Dec};
-          //TODO: add MemAlias to all states in the state set
-		  ExtendedMap.try_emplace(Alias2, Mapping.second);
-		  WorkMap2->try_emplace(Alias2, Mapping.second);
-        }   
-	 }
-   }
-   std::swap(WorkMap1, WorkMap2);
-  }
-}
-
-static void constructExternalReachMap(const ReachabilitySet &ReachSet, Function &Fn, const ExternalVals &ExtVals, ValueReachMap &ExternalReachMap) {
-	auto ReachMap = ReachSet.getReachMap();
-	auto DepthMap = ReachMap.getDepthMap();
-	auto ExtendAboveBelow = [&] (Value * Val) {
-	  getExtendedAliasesAbove(Val, ReachMap, ExternalReachMap[InstantiatedValue{Val, 0}]);
-	  getExtendedAliasesBelow(Val, ReachMap, DepthMap, ExternalReachMap);
-    };
-	for (auto &ExternalVal: Fn.args()) {
-	  ExtendAboveBelow(&ExternalVal);
-    }
-	for (auto ExternalVal: ExtVals.RetVals) {
-	  ExtendAboveBelow(ExternalVal);
-    }
-	for (auto ExternalVal: ExtVals.VAArgs) {
-	  ExtendAboveBelow(ExternalVal);
-    }
-	//for (auto ExternalVal: ExtVals.MutableGlobals) {
-	//  ExtendAboveBelow(ExternalVal);
-    //}
-}
-
 
 static void populateExternalRelations(
     SmallVectorImpl<ExternalRelation> &ExtRelations, const Function &Fn,
@@ -694,41 +663,76 @@ static void populateExternalAttributes(
       auto Attr = getExternallyVisibleAttrs(Mapping.second);
       if (Attr.any())
         ExtAttributes.push_back(ExternalAttribute{*IVal, Attr});
-	  //if(hasTaintedAttr(Attr))
-	    //errs() << "tainted InterfaceValue " << *IVal << "\n";
     }	
   }
 }
 
-void CFLAndersTaintResult::FunctionInfo::propagateExternalTaint(const TaintedSet &TaintSources, TaintedSet* NewTaints = nullptr) {
+static StateSet ExternalTaintShim(const StateSet &States) {
+  auto Ret = States;
+  if (Ret.test(static_cast<uint8_t>(MatchState::FlowFromMemAliasReadOnly)) || 
+      Ret.test(static_cast<uint8_t>(MatchState::FlowFromMemAliasNoReadWrite))) {
+    Ret.set(static_cast<uint8_t>(MatchState::FlowFromReadOnly));
+  }
+  if (Ret.test(static_cast<uint8_t>(MatchState::FlowToMemAliasWriteOnly))) {
+    Ret.set(static_cast<uint8_t>(MatchState::FlowToWriteOnly));
+  }
+  if (Ret.test(static_cast<uint8_t>(MatchState::FlowToMemAliasReadWrite))) {
+    Ret.set(static_cast<uint8_t>(MatchState::FlowToReadWrite));
+  }
+  Ret = Ret & ~StateSet(MemStateMask);
+  return Ret;
+}
+
+static void populateExternalTaints(
+    SmallVectorImpl<ExternalTaint> &ExtTaints, const Function &Fn,
+    const ExternalVals &ExtVals, const TaintedSet &TaintedVals) {
+  for (const auto &Mapping : TaintedVals) {
+    if (auto IVal = getInterfaceValue(Mapping.first, Fn, ExtVals)) {
+      auto ExternalTaintStates = ExternalTaintShim(Mapping.second);
+      ExtTaints.push_back(ExternalTaint{*IVal, ExternalTaintStates});
+      //errs() << "added to external taint " << *IVal << " with " << ExternalTaintStates.to_string() << "\n"; 
+    }	
+  }
+}
+
+void CFLAndersTaintResult::FunctionInfo::propagateTaint(const TaintedSet &TaintSources, TaintedSet* NewTaints = nullptr) {
   
-  for(auto &Source: TaintSources) {
-    if(TaintedVals.insert(Source).second) {
-  	  if(NewTaints)
-  	    NewTaints->insert(Source);
-  	  errs() << "external taint source " << Source << "\n";
-    }
-    auto Aliases = ReachMap.reachableValueAliases(Source);
-    for(auto &Mapping: Aliases) {
-      auto Taint = Mapping.first;
-      if(hasNonReadState(Mapping.second) && TaintedVals.insert(Taint).second) {			
-      	if(NewTaints) 
-      	  NewTaints->insert(Taint);
-      	errs() << "alias of taint source " << Taint << "\n";
-      }
-    }
- 
-    //expand out mem aliases not explored when processing intraprocedurally
-	if (NewTaints && Aliases.begin() == Aliases.end()) {
-      for (unsigned Dec = 1; Dec < Source.DerefLevel; Dec++) {
-        for(auto &Mapping: ReachMap.reachableValueAliases(InstantiatedValue{Source.Val, Source.DerefLevel - Dec})) {
-          auto Taint = InstantiatedValue{Mapping.first.Val, Mapping.first.DerefLevel + Dec};
-          if(Taint.DerefLevel > maxDerefLevel(Taint.Val))
-            continue;
-          if (NewTaints->insert(Taint).second) {
-      	    errs() << "expanded alias of taint source " << Taint << "\n";
+  for(auto &Mapping: TaintSources) {
+    auto IVal = Mapping.first;
+    auto NewTaintStates = TaintedVals.addStates(IVal, Mapping.second);
+    if(NewTaintStates.any()) {
+      if(NewTaints)
+        NewTaints->addStates(IVal, NewTaintStates);
+      //errs() << "taint source " << IVal << " with " << NewTaintStates.to_string() << "\n";
+      auto Aliases = ReachMap.reachableValueAliases(IVal);
+      for(auto &AliasMapping: Aliases) {
+        auto AliasIVal = AliasMapping.first;
+        auto NewTaintStates2 = composeStateSets(NewTaintStates, AliasMapping.second);
+        if(NewTaintStates2.any()) {
+          auto NewTaintStates3 = TaintedVals.addStates(AliasIVal, NewTaintStates2);
+          if(NewTaintStates3.any()) {			
+            if(NewTaints) 
+          	NewTaints->addStates(AliasIVal, NewTaintStates3);
+            //errs() << "alias of taint source " << AliasIVal << " with new states " << NewTaintStates3.to_string() << "\n";
           }
-		}
+        }
+      }
+ 
+      //expand out mem aliases not explored when processing intraprocedurally
+      //TODO: should Dec be incremented to <= IVal.DerefLevel? should ExpMapping be added to TaintedVals?
+      if (NewTaints && Aliases.begin() == Aliases.end()) {
+        for (unsigned Dec = 1; Dec <= IVal.DerefLevel; Dec++) {
+          for(auto &ExpMapping: ReachMap.reachableValueAliases(InstantiatedValue{IVal.Val, IVal.DerefLevel - Dec})) {
+            auto ExpIVal = InstantiatedValue{ExpMapping.first.Val, ExpMapping.first.DerefLevel + Dec};
+            if(ExpIVal.DerefLevel > maxDerefLevel(ExpIVal.Val))
+              continue;
+            
+            auto MemNoReadWrite = toStateSet(MatchState::FlowFromMemAliasNoReadWrite);
+            if(NewTaints->addStates(ExpIVal, MemNoReadWrite).any()) {
+        	  //errs() << "expanded alias of taint source " << ExpIVal << "\n";
+            }
+      	  }
+        }
       }
     }
   }
@@ -737,17 +741,20 @@ void CFLAndersTaintResult::FunctionInfo::propagateExternalTaint(const TaintedSet
 CFLAndersTaintResult::FunctionInfo::FunctionInfo(
     const Function &Fn, const ExternalVals &ExtVals, 
 	const ValueReachMap &ReachMap, const AliasAttrMap &AMap, 
-    const TaintedSet &TaintedVals): TaintedVals(TaintedVals), ReachMap(ReachMap) {
+    const TaintedSet &TaintSources): ReachMap(ReachMap) {
   populateAttrMap(AttrMap, AMap);
   populateExternalAttributes(Summary.RetParamAttributes, Fn, ExtVals, AMap);
   populateAliasMap(AliasMap, ReachMap);
   populateExternalRelations(Summary.RetParamRelations, Fn, ExtVals, ReachMap);
+  propagateTaint(TaintSources);
+  populateExternalTaints(Summary.RetParamTaints, Fn, ExtVals, TaintedVals);
 }
 
-DenseMap<const Function *, TaintedSet> InterprocTaintInfo::collectNewTaints (const TaintedSet &TaintedVals) {
-  DenseMap<const Function *, TaintedSet> WorkMap;
-  for (const auto &Tainted : TaintedVals) {					
-	for(const auto &Use : Tainted.Val->uses()) {
+void CFLAndersTaintResult::InterprocTaintInfo::collectNewTaints (const TaintedSet &TaintedVals) {
+  NewTaintMap.clear();
+  for (const auto &Mapping : TaintedVals) {
+    auto IVal = Mapping.first;					
+	for(const auto &Use : IVal.Val->uses()) {
 		if(const auto Call = dyn_cast<CallInst>(Use.getUser())) {
 			//arguments are the operands at the beginning in a CallInst
 			if(!Call->isArgOperand(&Use))
@@ -760,45 +767,51 @@ DenseMap<const Function *, TaintedSet> InterprocTaintInfo::collectNewTaints (con
 			unsigned ArgNum = CallSite(Call).getArgumentNo(&Use);
 			if(Callee->isVarArg() && ArgNum >= Callee->arg_size())
 				continue;
-			auto InstantiatedArg = InstantiatedValue{Callee->arg_begin() + ArgNum, Tainted.DerefLevel};
-			if(TaintedFuncArgsGlobals[Callee].insert(InstantiatedArg).second && 
-			   WorkMap[Callee].insert(InstantiatedArg).second) {
-				//errs() << "propagate formal argument taint from " << Tainted << " to " << InstantiatedArg << " to function " << Callee->getName() << "\n";
+			auto IArg = InstantiatedValue{Callee->arg_begin() + ArgNum, IVal.DerefLevel};
+            auto NewTaintStates = TaintedFuncArgsGlobals[Callee].addStates(IArg, Mapping.second);
+			if(NewTaintStates.any()) {
+			  NewTaintMap[Callee].addStates(IArg, NewTaintStates);
+				//errs() << "propagate formal argument taint from " << IVal << " to " << IArg << " to function " << Callee->getName() << "\n";
             }
 		}
 
 	}
 
-	if(isa<GlobalVariable>(Tainted.Val) 
-		&& TaintedGlobalVars.insert(Tainted).second) {
-		for(const auto &Use : Tainted.Val->uses()) {
+	if(isa<GlobalVariable>(IVal.Val)) { 
+      auto NewTaintStates = TaintedGlobalVars.addStates(IVal, Mapping.second);
+	  if (NewTaintStates.any()) {
+		for(const auto &Use : IVal.Val->uses()) {
 			if(auto Inst = dyn_cast<Instruction>(Use.getUser())) {
 				auto Func = Inst->getFunction();
-				if (Func && TaintedFuncArgsGlobals[Func].insert(Tainted).second &&
-					WorkMap[Func].insert(Tainted).second) { 
-				  //errs() << "propagate global taint to " << Tainted << " in function " << Func->getName() << "\n";
-	            }
+                if(!Func)
+                  continue;
+                TaintedFuncArgsGlobals[Func].addStates(IVal, NewTaintStates);
+			    NewTaintMap[Func].addStates(IVal, NewTaintStates);
+				//errs() << "propagate global taint to " << IVal << " in function " << Func->getName() << "\n";
 			}
 		}
-	}
+	  }
+    }
   }
-  return WorkMap;
 }
 
-void CFLAndersTaintResult::propagateInterproc(FunctionInfo &FuncInfo) {
-	auto WorkMap = ITI.collectNewTaints(FuncInfo.getTaintedVals());
+void CFLAndersTaintResult::propagateInterprocTaint(const Function &Fn) {
+    auto Itr = Cache.find(&Fn); 
+    assert(Itr != Cache.end() && Itr->second);
+    auto &FuncInfo = *Itr->second; 
+    FuncInfo.propagateTaint(ITI.TaintedFuncArgsGlobals[&Fn]);
+	ITI.collectNewTaints(FuncInfo.getTaintedVals());
 
-	while(!WorkMap.empty()) {
+	while(!ITI.NewTaintMap.empty()) {
 		TaintedSet NewTaints;
-		for (const auto &Pair: WorkMap) {
-			auto Itr = Cache.find(Pair.first); 
-			if(Itr != Cache.end()) {
-				auto &ToPropagate = Itr->second? *Itr->second : FuncInfo;
-				errs() << "propagate external taint to " << Pair.first->getName() << "\n";
-				ToPropagate.propagateExternalTaint(Pair.second, &NewTaints);
+		for (const auto &Pair: ITI.NewTaintMap) {
+			Itr = Cache.find(Pair.first); 
+			if(Itr != Cache.end() && Itr->second) {
+				//errs() << "propagate external taint to " << Pair.first->getName() << "\n";
+			    Itr->second->propagateTaint(Pair.second, &NewTaints);
 			}
 		}
-        WorkMap = ITI.collectNewTaints(NewTaints);
+        ITI.collectNewTaints(NewTaints);
 	}
 }
 
@@ -916,15 +929,11 @@ static void propagate(InstantiatedValue From, InstantiatedValue To,
 
 }
 
-static inline bool isPossiblyTainted(const Value *Val, const AliasAttrs Attr) {
-	return hasTaintedAttr(Attr) || 
-		   (!isValueImmutable(Val) && (hasEscapedAttr(Attr) || hasUnknownAttr(Attr))); 
-}
-
 static void initializeWorkList(std::vector<WorkListItem> &WorkList,
                                ReachabilitySet &ReachSet,
                                const CFLGraph &Graph,
-                               const ExternalVals &ExtVals) {
+                               const ExternalVals &ExtVals,
+                               const TaintedSet &TaintedVals) {
   for (const auto &Mapping : Graph.value_mappings()) {
     auto Val = Mapping.first;
     auto &ValueInfo = Mapping.second;
@@ -950,8 +959,7 @@ static void initializeWorkList(std::vector<WorkListItem> &WorkList,
     else { //value is a taint source at some level 
       unsigned LowerBound = 0;
       for (unsigned I = 0, E = ValueInfo.getNumLevels(); I < E; I++) {
-	    auto NodeInfo = ValueInfo.getNodeInfoAtLevel(I);
-        if(isPossiblyTainted(Val, NodeInfo.Attr)) 
+        if (TaintedVals.count(InstantiatedValue{Val, I}))
           LowerBound = I + 1;
       }
       for (unsigned I = 0; I < LowerBound; I++) {
@@ -959,8 +967,6 @@ static void initializeWorkList(std::vector<WorkListItem> &WorkList,
 	    auto NodeInfo = ValueInfo.getNodeInfoAtLevel(I);
         for (auto &Edge : NodeInfo.Edges)
           propagate(Src, Edge.Other, MatchState::FlowToWriteOnly, ReachSet, WorkList);
-        if(I == LowerBound - 1)
-          break;
         for (auto &Edge : NodeInfo.ReverseEdges)
           propagate(Src, Edge.Other, MatchState::FlowFromReadOnly, ReachSet,WorkList);
       }
@@ -1064,52 +1070,26 @@ static void processWorkListItem(const WorkListItem &Item, CFLGraph &Graph,
     }
   };
 
-  switch (Item.State) {
-  case MatchState::FlowFromReadOnly:
-    NextRevAssignState(MatchState::FlowFromReadOnly);
-    NextAssignState(MatchState::FlowToReadWrite);
-    NextMemState(MatchState::FlowFromMemAliasReadOnly);
-    break;
+  auto AfterRead = applyRead(Item.State);
+  if(AfterRead)
+    NextRevAssignState(*AfterRead);
 
-  case MatchState::FlowFromMemAliasNoReadWrite:
-    NextRevAssignState(MatchState::FlowFromReadOnly);
-    NextAssignState(MatchState::FlowToWriteOnly);
-    break;
+  NextAssignState(applyWrite(Item.State));
 
-  case MatchState::FlowFromMemAliasReadOnly:
-    NextRevAssignState(MatchState::FlowFromReadOnly);
-    NextAssignState(MatchState::FlowToReadWrite);
-    break;
-
-  case MatchState::FlowToWriteOnly:
-    NextAssignState(MatchState::FlowToWriteOnly);
-    NextMemState(MatchState::FlowToMemAliasWriteOnly);
-    break;
-
-  case MatchState::FlowToReadWrite:
-    NextAssignState(MatchState::FlowToReadWrite);
-    NextMemState(MatchState::FlowToMemAliasReadWrite);
-    break;
-
-  case MatchState::FlowToMemAliasWriteOnly:
-    NextAssignState(MatchState::FlowToWriteOnly);
-    break;
-
-  case MatchState::FlowToMemAliasReadWrite:
-    NextAssignState(MatchState::FlowToReadWrite);
-    break;
-  }
+  auto AfterMem = applyMemAlias(Item.State);
+  if(AfterMem)
+    NextMemState(*AfterMem);
 
   auto ToNodeAbove = getNodeAbove(Graph, ToNode);
-  if (notMemAliasState(Item.State) && ToNodeAbove) 
+  if (hasNonMemAliasState(toStateSet(Item.State)) && ToNodeAbove) 
   {
 	auto NodeAboveInfo = ConstGraph.getNode(*ToNodeAbove);
     for (const auto &Edge : NodeAboveInfo->Edges)
       propagate(*ToNodeAbove, Edge.Other, MatchState::FlowToWriteOnly, ReachSet,
-            WorkList);
+        WorkList);
     for (const auto &Edge : NodeAboveInfo->ReverseEdges) {
-          propagate(*ToNodeAbove, Edge.Other, MatchState::FlowFromReadOnly, ReachSet,
-            WorkList);
+      propagate(*ToNodeAbove, Edge.Other, MatchState::FlowFromReadOnly, ReachSet,
+        WorkList);
     }
     if (const auto AliasSet = MemSet.getMemoryAliases(*ToNodeAbove)) {
       for (const auto &MemAlias : *AliasSet)
@@ -1146,7 +1126,7 @@ static AliasAttrMap buildAttrMap(const CFLGraph &Graph,
       // Propagate attr on the same level
       for (const auto &Mapping : ReachMap.reachableValueAliases(Src)) {
         auto Dst = Mapping.first;
-		auto Attr = hasNonReadState(Mapping.second)? SrcAttr : maskTaintedAttr(SrcAttr);
+		auto Attr = hasNonReadOnlyState(Mapping.second)? SrcAttr : maskTaintedAttr(SrcAttr);
         if (AttrMap.add(Dst, Attr)) {
           NextList.push_back(Dst);
 		}
@@ -1170,45 +1150,26 @@ static AliasAttrMap buildAttrMap(const CFLGraph &Graph,
   return AttrMap;
 }
 
-static TaintedSet buildTaintedVals(const CFLGraph &Graph,
-                                   const AliasAttrMap &AttrMap) 
-{
-	TaintedSet TaintedVals;
-	for (const auto &Mapping : Graph.value_mappings()) {
-		auto Val = Mapping.first;
-		auto &ValueInfo = Mapping.second;
-		for (unsigned I = 0, E = ValueInfo.getNumLevels(); I < E; ++I) {
-			auto Node = InstantiatedValue{Val, I};
-			auto Attr = AttrMap.getAttrs(Node);
-			if(isPossiblyTainted(Val, Attr)) {
-				TaintedVals.insert(Node);
-				//errs() << "add to tainted values" << Node << "\n";
-			}
-		}
-	}
-	return TaintedVals;
-}
-
-
 CFLAndersTaintResult::FunctionInfo
 CFLAndersTaintResult::buildInfoFrom(const Function &Fn) {  
-  errs() << "------------------------------------------------------\n";
-  errs() << "building graph for " << getDemangledName(Fn) << "\n\n";
+  //errs() << "------------------------------------------------------\n";
+  //errs() << "building graph for " << getDemangledName(Fn) << "\n\n";
   CFLGraphBuilder<CFLAndersTaintResult> GraphBuilder(
       *this, TLI,
       // Cast away the constness here due to GraphBuilder's API requirement
       const_cast<Function &>(Fn)
     );
-  errs() << "------------------------------------------------------\n";
-  errs() << "building info for " << getDemangledName(Fn) << "\n\n";
+  //errs() << "------------------------------------------------------\n";
+  //errs() << "building info for " << getDemangledName(Fn) << "\n\n";
   //errs() << Fn << "\n";
   auto &Graph = GraphBuilder.getCFLGraph();
-
+  auto TaintedSources = Graph.getTainted();
+ 
   ReachabilitySet ReachSet;
   AliasMemSet MemSet;
 
   std::vector<WorkListItem> WorkList, NextList;
-  initializeWorkList(WorkList, ReachSet, Graph, GraphBuilder.getExternalVals());
+  initializeWorkList(WorkList, ReachSet, Graph, GraphBuilder.getExternalVals(), TaintedSources);
 
   // TODO: make sure we don't stop before the fix point is reached
   while (!WorkList.empty()) {
@@ -1223,15 +1184,11 @@ CFLAndersTaintResult::buildInfoFrom(const Function &Fn) {
   // Now that we have all the reachability info, propagate AliasAttrs according
   // to it
   auto IValueAttrMap = buildAttrMap(Graph, ReachMap);
-  auto TaintedVals = buildTaintedVals(Graph, IValueAttrMap);
 
-  auto FuncInfo = FunctionInfo(Fn, GraphBuilder.getExternalVals(), ReachMap, std::move(IValueAttrMap), std::move(TaintedVals));
+  auto FuncInfo = FunctionInfo(Fn, GraphBuilder.getExternalVals(), ReachMap, std::move(IValueAttrMap), TaintedSources);
 
-  FuncInfo.propagateExternalTaint(ITI.TaintedFuncArgsGlobals[&Fn]);
-  propagateInterproc(FuncInfo) ;
-
-  errs() << "------------------------------------------------------\n";
-  errs() << "finish building " << getDemangledName(Fn) << "\n\n";
+  //errs() << "------------------------------------------------------\n";
+  //errs() << "finish building " << getDemangledName(Fn) << "\n\n";
   //errs() << Fn << "\n";
   return FuncInfo;
 }
@@ -1249,6 +1206,7 @@ void CFLAndersTaintResult::scan(const Function &Fn) {
  
   auto FunInfo = buildInfoFrom(Fn);
   Cache[&Fn] = std::move(FunInfo);
+  propagateInterprocTaint(Fn);
 
   Handles.emplace_front(const_cast<Function *>(&Fn), this);
 }
@@ -1354,9 +1312,10 @@ Optional<DenseSet<Value *>> CFLAndersTaintResult::taintedVals(const Function &Fn
   if (FunInfo.hasValue()) {
     auto TSet = FunInfo->getTaintedVals();
 	DenseSet<Value *> Vals;
-    for(auto Itr = TSet.begin(); Itr != TSet.end(); Itr++) {
-        if(Itr->DerefLevel == 0) {
-            Vals.insert(Itr->Val);
+    for(const auto &Mapping: TSet) {
+        auto IVal = Mapping.first;
+        if(IVal.DerefLevel == 0) {
+            Vals.insert(IVal.Val);
         }
     }
     return Vals;

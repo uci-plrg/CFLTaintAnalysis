@@ -273,7 +273,7 @@ bool handleKnownFunctions(const CallSite CS, const TargetLibraryInfo *TLI, CFLGr
 	
   if (isAllocationFn(I, TLI)) {
 #ifdef ALL_ALLOC_FN_PMEM
-	Graph.addAttr(IV, getAttrTainted());
+	Graph.addNode(IV, AliasAttrs(), toStateSet(MatchState::FlowToWriteOnly));
 #endif
 	return true;
   }
@@ -288,12 +288,12 @@ bool handleKnownFunctions(const CallSite CS, const TargetLibraryInfo *TLI, CFLGr
   std::string FnName = Callee->getName().str();
 
   if(is_contained(PMAllocators, FnName)) {
-	Graph.addAttr(IV, getAttrTainted());
+	Graph.addNode(IV, AliasAttrs(), toStateSet(MatchState::FlowToWriteOnly));
 	return true;
   }
   if(is_contained(PMAllocatorsArg7Lv1, FnName)) {
 	auto Arg = CS.getArgOperand(7);
-	Graph.addNode(InstantiatedValue{Arg, 1}, getAttrTainted());
+	Graph.addNode(InstantiatedValue{Arg, 1}, AliasAttrs(), toStateSet(MatchState::FlowToWriteOnly));
     return true;
   }
   if(is_contained(noAliasFunctions, FnName))

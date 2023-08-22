@@ -78,6 +78,18 @@ bool hasTaintedAttr(AliasAttrs Attr) { return Attr.test(AttrTaintedIndex); }
 
 AliasAttrs maskTaintedAttr(AliasAttrs Attr) { return Attr & (~getAttrTainted()); }
 
+StateSet TaintedSet::addStates(InstantiatedValue IVal, StateSet NewStates) {
+  assert(NewStates.any());
+  auto Itr = find(IVal);
+  if(Itr == end()) {
+    try_emplace(IVal, NewStates);
+    return NewStates;
+  }
+  auto Ret = ~Itr->second & NewStates;
+  Itr->second |= NewStates;
+  return Ret;
+}
+
 AliasAttrs getExternallyVisibleAttrs(AliasAttrs Attr) {
   return Attr & AliasAttrs(ExternalAttrMask);
 }
@@ -110,5 +122,13 @@ Optional<InstantiatedAttr> instantiateExternalAttribute(ExternalAttribute EAttr,
     return None;
   return InstantiatedAttr{*Value, EAttr.Attr};
 }
+
+Optional<InstantiatedTaint> instantiateExternalTaint(ExternalTaint ETaint, CallSite CS) {
+  auto Value = instantiateInterfaceValue(ETaint.IValue, CS);
+  if (!Value)
+    return None;
+  return InstantiatedTaint{*Value, ETaint.TaintStates};
+}
+
 }
 }

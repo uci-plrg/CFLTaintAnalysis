@@ -32,23 +32,23 @@ class Function;
 class MemoryLocation;
 class TargetLibraryInfo;
 
-using TaintedSet = DenseSet<cflta::InstantiatedValue>; 
-
-struct InterprocTaintInfo {
-  //Save all tainted globals
-  TaintedSet TaintedGlobalVars;
-
-  //Save for each function all formal arguments and globals tainted
-  DenseMap<const Function *, TaintedSet> TaintedFuncArgsGlobals;
-
-  DenseMap<const Function *, TaintedSet> collectNewTaints (const TaintedSet &);
-};
-
 
 class CFLAndersTaintResult : public AAResultBase<CFLAndersTaintResult> {
   friend AAResultBase<CFLAndersTaintResult>;
 
   class FunctionInfo;
+
+  struct InterprocTaintInfo {
+    //Save all tainted globals
+    cflta::TaintedSet TaintedGlobalVars;
+  
+    //Save for each function all formal arguments and globals tainted
+    DenseMap<const Function *, cflta::TaintedSet> TaintedFuncArgsGlobals;
+  
+    DenseMap<const Function *, cflta::TaintedSet> NewTaintMap;
+  
+    void collectNewTaints (const cflta::TaintedSet &);
+  };
 
 public:
   explicit CFLAndersTaintResult(const TargetLibraryInfo &TLI);
@@ -100,7 +100,7 @@ private:
   
   InterprocTaintInfo ITI;
   
-  void propagateInterproc(FunctionInfo &); 
+  void propagateInterprocTaint(const Function &); 
   
   std::forward_list<cflta::FunctionHandle<CFLAndersTaintResult>> Handles;
 };

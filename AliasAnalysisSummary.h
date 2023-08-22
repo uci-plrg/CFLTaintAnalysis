@@ -34,7 +34,6 @@
 
 #ifndef LLVM_ANALYSIS_TAINT_ALIASANALYSISSUMMARY_H
 #define LLVM_ANALYSIS_TAINT_ALIASANALYSISSUMMARY_H
-
 #include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallVector.h"
@@ -44,6 +43,41 @@
 
 namespace llvm {
 namespace cflta {
+
+//===----------------------------------------------------------------------===//
+// MatchState related stuffs
+//===----------------------------------------------------------------------===//
+
+enum class MatchState : uint8_t {
+  // The following state represents S1 in the paper.
+  FlowFromReadOnly = 0,
+  // The following two states together represent S2 in the paper.
+  // The 'NoReadWrite' suffix indicates that there exists an alias path that
+  // does not contain assignment and reverse assignment edges.
+  // The 'ReadOnly' suffix indicates that there exists an alias path that
+  // contains reverse assignment edges only.
+  FlowFromMemAliasNoReadWrite,
+  FlowFromMemAliasReadOnly,
+  // The following two states together represent S3 in the paper.
+  // The 'WriteOnly' suffix indicates that there exists an alias path that
+  // contains assignment edges only.
+  // The 'ReadWrite' suffix indicates that there exists an alias path that
+  // contains both assignment and reverse assignment edges. Note that if X and Y
+  // are reachable at 'ReadWrite' state, it does NOT mean X is both read from
+  // and written to Y. Instead, it means that a third value Z is written to both
+  // X and Y.
+  FlowToWriteOnly,
+  FlowToReadWrite,
+  // The following two states together represent S4 in the paper.
+  FlowToMemAliasWriteOnly,
+  FlowToMemAliasReadWrite,
+};
+
+using StateSet = std::bitset<7>;
+
+static inline StateSet toStateSet(MatchState State) {
+  return StateSet(1U << static_cast<uint8_t>(State));
+}
 
 //===----------------------------------------------------------------------===//
 // AliasAttr related stuffs
@@ -198,7 +232,12 @@ struct ExternalAttribute {
   AliasAttrs Attr;
 };
 
-
+/// We use ExternalAttribute to describe an externally visible taint
+/// for parameters/return value.
+struct ExternalTaint {
+  InterfaceValue IValue;
+  StateSet TaintStates;
+};
 
 /// AliasSummary is just a collection of ExternalRelation and ExternalAttribute
 struct AliasSummary {
@@ -207,6 +246,9 @@ struct AliasSummary {
 
   // RetParamAttributes is a collection of ExternalAttributes.
   SmallVector<ExternalAttribute, 8> RetParamAttributes;
+  
+  // RetParamTaints is a collection of ExternalTaints.
+  SmallVector<ExternalTaint, 8> RetParamTaints;
 };
 
 /// This is the result of instantiating InterfaceValue at a particular callsite
@@ -239,6 +281,11 @@ inline raw_ostream &operator<<(raw_ostream &OS, const InstantiatedValue &IV) {
     return OS << *IV.Val << " at level " << IV.DerefLevel;
 }
 
+class TaintedSet: public DenseMap<InstantiatedValue, StateSet> {
+public:
+  StateSet addStates(InstantiatedValue IVal, StateSet NewStates);
+};
+
 /// This is the result of instantiating ExternalRelation at a particular
 /// callsite
 struct InstantiatedRelation {
@@ -254,6 +301,12 @@ struct InstantiatedAttr {
   AliasAttrs Attr;
 };
 Optional<InstantiatedAttr> instantiateExternalAttribute(ExternalAttribute, CallSite);
+
+struct InstantiatedTaint {
+  InstantiatedValue IValue;
+  StateSet TaintStates;
+};
+Optional<InstantiatedTaint> instantiateExternalTaint(ExternalTaint, CallSite);
 }
 
 template <> struct DenseMapInfo<cflta::InstantiatedValue> {

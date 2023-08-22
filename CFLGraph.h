@@ -71,15 +71,19 @@ private:
   using ValueMap = DenseMap<Value *, ValueInfo>;
 
   ValueMap ValueImpls;
+    
+  TaintedSet Tainted;
 
   NodeInfo *getNode(Node N);
+ 
+  void addTaintByAttributes(Node N, AliasAttrs Attr);
 
 public:
   using const_value_iterator = ValueMap::const_iterator;
 
   unsigned getCurMaxLevel(const Value* Val) const; 
   
-  bool addNode(Node N, AliasAttrs Attr = AliasAttrs());
+  bool addNode(Node N, AliasAttrs Attr = AliasAttrs(), StateSet TaintStates = StateSet());
 
   void addAttr(Node N, AliasAttrs Attr);
 
@@ -90,6 +94,8 @@ public:
   AliasAttrs attrFor(Node N) const;
   
   iterator_range<const_value_iterator> value_mappings() const;
+
+  const TaintedSet &getTainted() const;
   
   void propagateLevels(); 
 };
