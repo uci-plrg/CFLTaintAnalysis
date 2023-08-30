@@ -32,23 +32,10 @@ class Function;
 class MemoryLocation;
 class TargetLibraryInfo;
 
-
 class CFLAndersTaintResult : public AAResultBase<CFLAndersTaintResult> {
   friend AAResultBase<CFLAndersTaintResult>;
 
   class FunctionInfo;
-
-  struct InterprocTaintInfo {
-    //Save all tainted globals
-    cflta::TaintedSet TaintedGlobalVars;
-  
-    //Save for each function all formal arguments and globals tainted
-    DenseMap<const Function *, cflta::TaintedSet> TaintedFuncArgsGlobals;
-  
-    DenseMap<const Function *, cflta::TaintedSet> NewTaintMap;
-  
-    void collectNewTaints (const cflta::TaintedSet &);
-  };
 
 public:
   explicit CFLAndersTaintResult(const TargetLibraryInfo &TLI);
@@ -98,7 +85,7 @@ private:
   /// that simply has empty sets.
   DenseMap<const Function *, Optional<FunctionInfo>> Cache;
   
-  InterprocTaintInfo ITI;
+  cflta::InterprocTaintInfo ITI;
   
   void propagateInterprocTaint(const Function &); 
   

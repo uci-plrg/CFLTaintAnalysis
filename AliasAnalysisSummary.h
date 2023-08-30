@@ -123,12 +123,6 @@ AliasAttrs getGlobalOrArgAttrFromValue(const Value &);
 bool isGlobalOrArgAttr(AliasAttrs);
 bool hasGlobalAttr(AliasAttrs); 
 
-// AttrTainted indicates a tainted value
-// it does not propagate downwards
-AliasAttrs getAttrTainted();
-bool hasTaintedAttr(AliasAttrs Attr);
-AliasAttrs maskTaintedAttr(AliasAttrs Attr);
-
 /// Given an AliasAttrs, return a new AliasAttrs that only contains attributes
 /// meaningful to the caller. This function is primarily used for
 /// interprocedural analysis
@@ -284,6 +278,16 @@ inline raw_ostream &operator<<(raw_ostream &OS, const InstantiatedValue &IV) {
 class TaintedSet: public DenseMap<InstantiatedValue, StateSet> {
 public:
   StateSet addStates(InstantiatedValue IVal, StateSet NewStates);
+};  
+
+using FuncTaintMap = DenseMap<const Function *, cflta::TaintedSet>;
+
+struct InterprocTaintInfo {
+  //Save all tainted globals
+  TaintedSet TaintedGlobalVars;
+  
+  //Save for each function all formal arguments and globals tainted
+  FuncTaintMap TaintedFuncArgsGlobals; 
 };
 
 /// This is the result of instantiating ExternalRelation at a particular

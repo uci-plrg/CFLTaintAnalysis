@@ -53,6 +53,13 @@ using namespace PatternMatch;
 struct ExternalVals {
   SmallVector<Value *, 4> RetVals;
   SmallVector<Value *, 4> VAArgs;
+  SmallVector<Value *, 4> ActualArgs;
+
+  void sort() {
+	llvm::sort(RetVals);
+    llvm::sort(VAArgs);
+    llvm::sort(ActualArgs);
+  }
 };
 
 template <typename CFLAA> class CFLGraphBuilder {
@@ -415,6 +422,7 @@ template <typename CFLAA> class CFLGraphBuilder {
       for (Value *V : CS.args()) {
         if (V->getType()->isPointerTy()) {
           addNode(V);
+          ExtVals.ActualArgs.push_back(V);
 		}
 	  }
       if (Inst->getType()->isPointerTy())
@@ -649,6 +657,8 @@ template <typename CFLAA> class CFLGraphBuilder {
 
     for (auto &Arg : Fn.args())
       addArgumentToGraph(Arg);
+    
+    ExtVals.sort();
   }
 
 public:

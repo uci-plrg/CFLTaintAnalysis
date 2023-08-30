@@ -504,12 +504,25 @@ getInterfaceValue(InstantiatedValue IValue,
 }
 
 static bool
-isExternalValue(const Value *Val,
+isOutputExternalValue(const Value *Val,
                  const ExternalVals &ExtVals) {
   bool Ret = false;
   if (isa<Argument>(Val) || 
-      is_contained(ExtVals.VAArgs, Val) || 
-      is_contained(ExtVals.RetVals, Val))
+      std::binary_search(ExtVals.VAArgs.begin(), ExtVals.VAArgs.end(), Val) || 
+      std::binary_search(ExtVals.RetVals.begin(), ExtVals.RetVals.end(), Val))
+    Ret = true;
+  if (auto GVar = dyn_cast<GlobalVariable>(Val)) 
+    if (!GVar->isConstant())
+      Ret = true;
+
+  return Ret;
+}
+
+static bool
+isInputExternalValue(const Value *Val,
+                 const ExternalVals &ExtVals) {
+  bool Ret = false;
+  if (std::binary_search(ExtVals.ActualArgs.begin(), ExtVals.ActualArgs.end(), Val))
     Ret = true;
   if (auto GVar = dyn_cast<GlobalVariable>(Val)) 
     if (!GVar->isConstant())
@@ -712,7 +725,7 @@ void CFLAndersTaintResult::FunctionInfo::propagateTaint(const TaintedSet &TaintS
           auto NewTaintStates3 = TaintedVals.addStates(AliasIVal, NewTaintStates2);
           if(NewTaintStates3.any()) {			
             if(NewTaints) 
-          	NewTaints->addStates(AliasIVal, NewTaintStates3);
+          	  NewTaints->addStates(AliasIVal, NewTaintStates3);
             //errs() << "alias of taint source " << AliasIVal << " with new states " << NewTaintStates3.to_string() << "\n";
           }
         }
@@ -750,8 +763,7 @@ CFLAndersTaintResult::FunctionInfo::FunctionInfo(
   populateExternalTaints(Summary.RetParamTaints, Fn, ExtVals, TaintedVals);
 }
 
-void CFLAndersTaintResult::InterprocTaintInfo::collectNewTaints (const TaintedSet &TaintedVals) {
-  NewTaintMap.clear();
+static void collectNewTaints(const TaintedSet &TaintedVals, InterprocTaintInfo &ITI, FuncTaintMap &NewTaintMap) {
   for (const auto &Mapping : TaintedVals) {
     auto IVal = Mapping.first;					
 	for(const auto &Use : IVal.Val->uses()) {
@@ -768,7 +780,7 @@ void CFLAndersTaintResult::InterprocTaintInfo::collectNewTaints (const TaintedSe
 			if(Callee->isVarArg() && ArgNum >= Callee->arg_size())
 				continue;
 			auto IArg = InstantiatedValue{Callee->arg_begin() + ArgNum, IVal.DerefLevel};
-            auto NewTaintStates = TaintedFuncArgsGlobals[Callee].addStates(IArg, Mapping.second);
+            auto NewTaintStates = ITI.TaintedFuncArgsGlobals[Callee].addStates(IArg, Mapping.second);
 			if(NewTaintStates.any()) {
 			  NewTaintMap[Callee].addStates(IArg, NewTaintStates);
 				//errs() << "propagate formal argument taint from " << IVal << " to " << IArg << " to function " << Callee->getName() << "\n";
@@ -778,14 +790,14 @@ void CFLAndersTaintResult::InterprocTaintInfo::collectNewTaints (const TaintedSe
 	}
 
 	if(isa<GlobalVariable>(IVal.Val)) { 
-      auto NewTaintStates = TaintedGlobalVars.addStates(IVal, Mapping.second);
+      auto NewTaintStates = ITI.TaintedGlobalVars.addStates(IVal, Mapping.second);
 	  if (NewTaintStates.any()) {
 		for(const auto &Use : IVal.Val->uses()) {
 			if(auto Inst = dyn_cast<Instruction>(Use.getUser())) {
 				auto Func = Inst->getFunction();
                 if(!Func)
                   continue;
-                TaintedFuncArgsGlobals[Func].addStates(IVal, NewTaintStates);
+                ITI.TaintedFuncArgsGlobals[Func].addStates(IVal, NewTaintStates);
 			    NewTaintMap[Func].addStates(IVal, NewTaintStates);
 				//errs() << "propagate global taint to " << IVal << " in function " << Func->getName() << "\n";
 			}
@@ -800,18 +812,21 @@ void CFLAndersTaintResult::propagateInterprocTaint(const Function &Fn) {
     assert(Itr != Cache.end() && Itr->second);
     auto &FuncInfo = *Itr->second; 
     FuncInfo.propagateTaint(ITI.TaintedFuncArgsGlobals[&Fn]);
-	ITI.collectNewTaints(FuncInfo.getTaintedVals());
+    FuncTaintMap NewTaintMap, NextTaintMap;
+	collectNewTaints(FuncInfo.getTaintedVals(), ITI, NewTaintMap);
 
-	while(!ITI.NewTaintMap.empty()) {
+	while(!NewTaintMap.empty()) {
 		TaintedSet NewTaints;
-		for (const auto &Pair: ITI.NewTaintMap) {
+		for (const auto &Pair: NewTaintMap) {
 			Itr = Cache.find(Pair.first); 
 			if(Itr != Cache.end() && Itr->second) {
 				//errs() << "propagate external taint to " << Pair.first->getName() << "\n";
 			    Itr->second->propagateTaint(Pair.second, &NewTaints);
+                collectNewTaints(NewTaints, ITI, NextTaintMap);
 			}
 		}
-        ITI.collectNewTaints(NewTaints);
+        NewTaintMap.swap(NextTaintMap);
+        NextTaintMap.clear();
 	}
 }
 
@@ -940,7 +955,7 @@ static void initializeWorkList(std::vector<WorkListItem> &WorkList,
     assert(ValueInfo.getNumLevels() > 0);
    
 	//values with possible external effects 
-    if (isExternalValue(Val, ExtVals)) {
+    if (isOutputExternalValue(Val, ExtVals)) {
       for (unsigned I = 0, E = ValueInfo.getNumLevels(); I < E; ++I) {
         auto Src = InstantiatedValue{Val, I};
         //might only need to propagate through one direction
@@ -992,16 +1007,12 @@ static Optional<InstantiatedValue> getNodeAbove(const CFLGraph &Graph,
   return None;
 }
 
-static void processWorkListItem(const WorkListItem &Item, CFLGraph &Graph,
+static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
                                 ReachabilitySet &ReachSet, AliasMemSet &MemSet,
                                 std::vector<WorkListItem> &WorkList,
                                 const ExternalVals &ExtVals) {
   auto FromNode = Item.From;
-  auto ToNode = Item.To;
-  const auto ConstGraph = const_cast<const CFLGraph&>(Graph);
-  auto NodeInfo = ConstGraph.getNode(ToNode);
-  assert(NodeInfo != nullptr);
-  
+  auto ToNode = Item.To; 
   //errs() << "item from " << Item.From << " to " << Item.To << " with " << Item.State << "\n";
 
   // FIXME: Here is a neat trick we can do: since both ReachSet and MemSet holds
@@ -1013,17 +1024,15 @@ static void processWorkListItem(const WorkListItem &Item, CFLGraph &Graph,
     
   auto FromNodeBelow = getNodeBelow(Graph, FromNode);
   auto ToNodeBelow = getNodeBelow(Graph, ToNode);
-  if(ToNodeBelow && !FromNodeBelow && isExternalValue(FromNode.Val, ExtVals) &&
+  if(ToNodeBelow && !FromNodeBelow && isOutputExternalValue(FromNode.Val, ExtVals) &&
        FromNode.DerefLevel < maxDerefLevel(FromNode.Val)) {
      FromNodeBelow = InstantiatedValue{FromNode.Val, FromNode.DerefLevel + 1};
      //errs() << "add level to FromNode " << FromNode << " due to " << ToNode << " with " << Item.State << "\n";
-     Graph.addNode(*FromNodeBelow);
   } 
-  else if (FromNodeBelow && !ToNodeBelow && 
+  else if (FromNodeBelow && !ToNodeBelow && (isOutputExternalValue(ToNode.Val, ExtVals) || isInputExternalValue(ToNode.Val, ExtVals)) && 
        ToNode.DerefLevel < maxDerefLevel(ToNode.Val)) {
      ToNodeBelow = InstantiatedValue{ToNode.Val, ToNode.DerefLevel + 1};
      //errs() << "add level to ToNode " << ToNode << " due to " << FromNode << " with " << Item.State << "\n";
-     Graph.addNode(*ToNodeBelow);
   }
 
   
@@ -1047,43 +1056,47 @@ static void processWorkListItem(const WorkListItem &Item, CFLGraph &Graph,
     }
   }
 
-  // This is the core of the state machine walking algorithm. We expand ReachSet
-  // based on which state we are at (which in turn dictates what edges we
-  // should examine)
-  // From a high-level point of view, the state machine here guarantees two
-  // properties:
-  // - If *X and *Y are memory aliases, then X and Y are value aliases
-  // - If Y is an alias of X, then reverse assignment edges (if there is any)
-  // should precede any assignment edges on the path from X to Y.
-  auto NextAssignState = [&](MatchState State) {
-    for (const auto &AssignEdge : NodeInfo->Edges)
-        propagate(FromNode, AssignEdge.Other, State, ReachSet, WorkList);
-  };
-  auto NextRevAssignState = [&](MatchState State) {
-    for (const auto &RevAssignEdge : NodeInfo->ReverseEdges)
-        propagate(FromNode, RevAssignEdge.Other, State, ReachSet, WorkList);
-  };
-  auto NextMemState = [&](MatchState State) {
-    if (auto AliasSet = MemSet.getMemoryAliases(ToNode)) {
-      for (const auto &MemAlias : *AliasSet)
-        propagate(FromNode, MemAlias, State, ReachSet, WorkList);
-    }
-  };
-
-  auto AfterRead = applyRead(Item.State);
-  if(AfterRead)
-    NextRevAssignState(*AfterRead);
-
-  NextAssignState(applyWrite(Item.State));
-
-  auto AfterMem = applyMemAlias(Item.State);
-  if(AfterMem)
-    NextMemState(*AfterMem);
+  auto NodeInfo = Graph.getNode(ToNode);
+  if(NodeInfo) {
+  
+    // This is the core of the state machine walking algorithm. We expand ReachSet
+    // based on which state we are at (which in turn dictates what edges we
+    // should examine)
+    // From a high-level point of view, the state machine here guarantees two
+    // properties:
+    // - If *X and *Y are memory aliases, then X and Y are value aliases
+    // - If Y is an alias of X, then reverse assignment edges (if there is any)
+    // should precede any assignment edges on the path from X to Y.
+    auto NextAssignState = [&](MatchState State) {
+      for (const auto &AssignEdge : NodeInfo->Edges)
+          propagate(FromNode, AssignEdge.Other, State, ReachSet, WorkList);
+    };
+    auto NextRevAssignState = [&](MatchState State) {
+      for (const auto &RevAssignEdge : NodeInfo->ReverseEdges)
+          propagate(FromNode, RevAssignEdge.Other, State, ReachSet, WorkList);
+    };
+    auto NextMemState = [&](MatchState State) {
+      if (auto AliasSet = MemSet.getMemoryAliases(ToNode)) {
+        for (const auto &MemAlias : *AliasSet)
+          propagate(FromNode, MemAlias, State, ReachSet, WorkList);
+      }
+    };
+  
+    auto AfterRead = applyRead(Item.State);
+    if(AfterRead)
+      NextRevAssignState(*AfterRead);
+  
+    NextAssignState(applyWrite(Item.State));
+  
+    auto AfterMem = applyMemAlias(Item.State);
+    if(AfterMem)
+      NextMemState(*AfterMem);
+  }
 
   auto ToNodeAbove = getNodeAbove(Graph, ToNode);
   if (hasNonMemAliasState(toStateSet(Item.State)) && ToNodeAbove) 
   {
-	auto NodeAboveInfo = ConstGraph.getNode(*ToNodeAbove);
+	auto NodeAboveInfo = Graph.getNode(*ToNodeAbove);
     for (const auto &Edge : NodeAboveInfo->Edges)
       propagate(*ToNodeAbove, Edge.Other, MatchState::FlowToWriteOnly, ReachSet,
         WorkList);
@@ -1096,9 +1109,6 @@ static void processWorkListItem(const WorkListItem &Item, CFLGraph &Graph,
         propagate(*ToNodeAbove, MemAlias, MatchState::FlowFromMemAliasNoReadWrite, ReachSet, WorkList);
     }
   }
-
-
-
 }
 
 static AliasAttrMap buildAttrMap(const CFLGraph &Graph,
@@ -1126,15 +1136,13 @@ static AliasAttrMap buildAttrMap(const CFLGraph &Graph,
       // Propagate attr on the same level
       for (const auto &Mapping : ReachMap.reachableValueAliases(Src)) {
         auto Dst = Mapping.first;
-		auto Attr = hasNonReadOnlyState(Mapping.second)? SrcAttr : maskTaintedAttr(SrcAttr);
-        if (AttrMap.add(Dst, Attr)) {
+        if (AttrMap.add(Dst, SrcAttr)) {
           NextList.push_back(Dst);
 		}
       }
 
       // Propagate attr to the levels below
       auto SrcBelow = getNodeBelow(Graph, Src);
-	  SrcAttr = maskTaintedAttr(SrcAttr);
       while (SrcBelow) {
         if (AttrMap.add(*SrcBelow, SrcAttr)) {
           NextList.push_back(*SrcBelow);
