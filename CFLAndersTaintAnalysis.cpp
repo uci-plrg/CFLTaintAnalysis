@@ -332,7 +332,7 @@ public:
   bool insert(InstantiatedValue LHS, InstantiatedValue RHS) {
     // Top-level values can never be memory aliases because one cannot take the
     // addresses of them
-    assert(LHS.DerefLevel > 0 && RHS.DerefLevel > 0);
+    //assert(LHS.DerefLevel > 0 && RHS.DerefLevel > 0);
     return MemMap[LHS].insert(RHS).second;
   }
 
@@ -732,16 +732,14 @@ void CFLAndersTaintResult::FunctionInfo::propagateTaint(const TaintedSet &TaintS
       }
  
       //expand out mem aliases not explored when processing intraprocedurally
-      //TODO: should Dec be incremented to <= IVal.DerefLevel? should ExpMapping be added to TaintedVals?
       if (NewTaints && Aliases.begin() == Aliases.end()) {
         for (unsigned Dec = 1; Dec <= IVal.DerefLevel; Dec++) {
           for(auto &ExpMapping: ReachMap.reachableValueAliases(InstantiatedValue{IVal.Val, IVal.DerefLevel - Dec})) {
             auto ExpIVal = InstantiatedValue{ExpMapping.first.Val, ExpMapping.first.DerefLevel + Dec};
-            if(ExpIVal.DerefLevel > maxDerefLevel(ExpIVal.Val))
-              continue;
-            
+            ExpIVal.DerefLevel = std::min(ExpIVal.DerefLevel, maxDerefLevel(ExpIVal.Val));
             auto MemNoReadWrite = toStateSet(MatchState::FlowFromMemAliasNoReadWrite);
-            if(NewTaints->addStates(ExpIVal, MemNoReadWrite).any()) {
+            if(TaintedVals.addStates(ExpIVal, MemNoReadWrite).any()) {
+              NewTaints->addStates(ExpIVal, MemNoReadWrite);
         	  //errs() << "expanded alias of taint source " << ExpIVal << "\n";
             }
       	  }
@@ -944,51 +942,6 @@ static void propagate(InstantiatedValue From, InstantiatedValue To,
 
 }
 
-static void initializeWorkList(std::vector<WorkListItem> &WorkList,
-                               ReachabilitySet &ReachSet,
-                               const CFLGraph &Graph,
-                               const ExternalVals &ExtVals,
-                               const TaintedSet &TaintedVals) {
-  for (const auto &Mapping : Graph.value_mappings()) {
-    auto Val = Mapping.first;
-    auto &ValueInfo = Mapping.second;
-    assert(ValueInfo.getNumLevels() > 0);
-   
-	//values with possible external effects 
-    if (isOutputExternalValue(Val, ExtVals)) {
-      for (unsigned I = 0, E = ValueInfo.getNumLevels(); I < E; ++I) {
-        auto Src = InstantiatedValue{Val, I};
-        //might only need to propagate through one direction
-		auto NodeInfo = ValueInfo.getNodeInfoAtLevel(I);
-        for (auto &Edge : NodeInfo.Edges) {
-          propagate(Src, Edge.Other, MatchState::FlowToWriteOnly, ReachSet,
-            WorkList);
-        }
-        for (auto &Edge : NodeInfo.ReverseEdges) {
-          propagate(Src, Edge.Other, MatchState::FlowFromReadOnly, ReachSet,
-            WorkList);
-          }
-
-      }
-    }
-    else { //value is a taint source at some level 
-      unsigned LowerBound = 0;
-      for (unsigned I = 0, E = ValueInfo.getNumLevels(); I < E; I++) {
-        if (TaintedVals.count(InstantiatedValue{Val, I}))
-          LowerBound = I + 1;
-      }
-      for (unsigned I = 0; I < LowerBound; I++) {
-        auto Src = InstantiatedValue{Val, I};
-	    auto NodeInfo = ValueInfo.getNodeInfoAtLevel(I);
-        for (auto &Edge : NodeInfo.Edges)
-          propagate(Src, Edge.Other, MatchState::FlowToWriteOnly, ReachSet, WorkList);
-        for (auto &Edge : NodeInfo.ReverseEdges)
-          propagate(Src, Edge.Other, MatchState::FlowFromReadOnly, ReachSet,WorkList);
-      }
-    }
-  }
-}
-
 static Optional<InstantiatedValue> getNodeBelow(const CFLGraph &Graph,
                                                 InstantiatedValue V) {
   auto NodeBelow = InstantiatedValue{V.Val, V.DerefLevel + 1};
@@ -1024,14 +977,12 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
     
   auto FromNodeBelow = getNodeBelow(Graph, FromNode);
   auto ToNodeBelow = getNodeBelow(Graph, ToNode);
-  if(ToNodeBelow && !FromNodeBelow && isOutputExternalValue(FromNode.Val, ExtVals) &&
-       FromNode.DerefLevel < maxDerefLevel(FromNode.Val)) {
-     FromNodeBelow = InstantiatedValue{FromNode.Val, FromNode.DerefLevel + 1};
+  if(ToNodeBelow && !FromNodeBelow && isOutputExternalValue(FromNode.Val, ExtVals)) {
+     FromNodeBelow = InstantiatedValue{FromNode.Val, std::min(FromNode.DerefLevel + 1, maxDerefLevel(FromNode.Val))};
      //errs() << "add level to FromNode " << FromNode << " due to " << ToNode << " with " << Item.State << "\n";
   } 
-  else if (FromNodeBelow && !ToNodeBelow && (isOutputExternalValue(ToNode.Val, ExtVals) || isInputExternalValue(ToNode.Val, ExtVals)) && 
-       ToNode.DerefLevel < maxDerefLevel(ToNode.Val)) {
-     ToNodeBelow = InstantiatedValue{ToNode.Val, ToNode.DerefLevel + 1};
+  else if (FromNodeBelow && !ToNodeBelow && (isOutputExternalValue(ToNode.Val, ExtVals) || isInputExternalValue(ToNode.Val, ExtVals))) {
+     ToNodeBelow = InstantiatedValue{ToNode.Val, std::min(ToNode.DerefLevel + 1, maxDerefLevel(ToNode.Val))};
      //errs() << "add level to ToNode " << ToNode << " due to " << FromNode << " with " << Item.State << "\n";
   }
 
@@ -1058,7 +1009,7 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
 
   auto NodeInfo = Graph.getNode(ToNode);
   if(NodeInfo) {
-  
+     
     // This is the core of the state machine walking algorithm. We expand ReachSet
     // based on which state we are at (which in turn dictates what edges we
     // should examine)
@@ -1081,17 +1032,17 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
           propagate(FromNode, MemAlias, State, ReachSet, WorkList);
       }
     };
-  
+    
     auto AfterRead = applyRead(Item.State);
     if(AfterRead)
       NextRevAssignState(*AfterRead);
-  
+    
     NextAssignState(applyWrite(Item.State));
-  
+    
     auto AfterMem = applyMemAlias(Item.State);
     if(AfterMem)
       NextMemState(*AfterMem);
-  }
+  } 
 
   auto ToNodeAbove = getNodeAbove(Graph, ToNode);
   if (hasNonMemAliasState(toStateSet(Item.State)) && ToNodeAbove) 
@@ -1104,9 +1055,61 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
       propagate(*ToNodeAbove, Edge.Other, MatchState::FlowFromReadOnly, ReachSet,
         WorkList);
     }
-    if (const auto AliasSet = MemSet.getMemoryAliases(*ToNodeAbove)) {
-      for (const auto &MemAlias : *AliasSet)
-        propagate(*ToNodeAbove, MemAlias, MatchState::FlowFromMemAliasNoReadWrite, ReachSet, WorkList);
+  }
+}
+
+static void exploreFromNode(InstantiatedValue Node, const CFLGraph &Graph,
+                            ReachabilitySet &ReachSet, AliasMemSet &MemSet,
+                            const ExternalVals &ExtVals) {
+  std::vector<WorkListItem> WorkList, NextList;
+  auto NodeInfo = Graph.getNode(Node);
+
+  assert(NodeInfo);
+  for (auto &Edge : NodeInfo->Edges) {
+    propagate(Node, Edge.Other, MatchState::FlowToWriteOnly, ReachSet,
+      WorkList);
+  }
+  for (auto &Edge : NodeInfo->ReverseEdges) {
+    propagate(Node, Edge.Other, MatchState::FlowFromReadOnly, ReachSet,
+      WorkList);
+  }
+
+  while (!WorkList.empty()) {
+    for (const auto &Item : WorkList) {
+      processWorkListItem(Item, Graph, ReachSet, MemSet, NextList, ExtVals);
+    }
+    NextList.swap(WorkList);
+    NextList.clear();
+  }
+}
+
+static void processWorkList(ReachabilitySet &ReachSet,
+                               AliasMemSet &MemSet,
+                               const CFLGraph &Graph,
+                               const ExternalVals &ExtVals,
+                               const TaintedSet &TaintedVals) {
+  for (const auto &Mapping : Graph.value_mappings()) {
+    auto Val = Mapping.first;
+    auto &ValueInfo = Mapping.second;
+    assert(ValueInfo.getNumLevels() > 0);
+
+       //values with possible external effects
+    if (isOutputExternalValue(Val, ExtVals)) {
+      for (unsigned I = 0, E = ValueInfo.getNumLevels(); I < E; ++I) {
+        auto Src = InstantiatedValue{Val, I};
+        exploreFromNode(Src, Graph, ReachSet, MemSet, ExtVals);
+      }
+    }
+    else { //value is a taint source at some level
+      unsigned LowerBound = 0;
+      for (unsigned I = 0, E = ValueInfo.getNumLevels(); I < E; I++) {
+        if (TaintedVals.count(InstantiatedValue{Val, I}))
+          LowerBound = I + 1;
+      }
+      for (unsigned I = 0; I < LowerBound; I++) {
+        auto Src = InstantiatedValue{Val, I};
+        exploreFromNode(Src, Graph, ReachSet, MemSet, ExtVals);
+     }
     }
   }
 }
@@ -1175,18 +1178,8 @@ CFLAndersTaintResult::buildInfoFrom(const Function &Fn) {
  
   ReachabilitySet ReachSet;
   AliasMemSet MemSet;
-
-  std::vector<WorkListItem> WorkList, NextList;
-  initializeWorkList(WorkList, ReachSet, Graph, GraphBuilder.getExternalVals(), TaintedSources);
-
-  // TODO: make sure we don't stop before the fix point is reached
-  while (!WorkList.empty()) {
-    for (const auto &Item : WorkList)
-      processWorkListItem(Item, Graph, ReachSet, MemSet, NextList, GraphBuilder.getExternalVals());
-
-    NextList.swap(WorkList);
-    NextList.clear();
-  }
+ 
+  processWorkList(ReachSet, MemSet, Graph, GraphBuilder.getExternalVals(), TaintedSources);
 
   const ValueReachMap ReachMap = ReachSet.getReachMap();
   // Now that we have all the reachability info, propagate AliasAttrs according
