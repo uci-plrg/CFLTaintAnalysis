@@ -374,6 +374,43 @@ public:
   }
 };
 
+
+class AliasContext {
+  using CallSiteList = SmallVector<CallSite, 8>;
+  CallSiteList Calls;
+  unsigned EntryStartIndex;
+  //Bounding number of entries only reduces precision, whereas bounding number of exits compromises soundness
+  const static unsigned MaxEntryLength = 10;
+
+public:
+  AliasContext(CallSiteList Calls, unsigned EntryStartIndex = 0): Calls(Calls), EntryStartIndex(EntryStartIndex) {}
+
+  Optional<AliasContext> composeWith(AliasContext &Other) {
+    auto EntryItr = Calls.rbegin();
+    auto EntryStart = Calls.rend() - EntryStartIndex;
+    assert(EntryItr <= EntryStart);
+ 
+    auto OtherExitItr = Other.Calls.begin();
+    auto OtherEntryStart = Other.Calls.begin() + Other.EntryStartIndex;
+    assert(OtherExitItr <= OtherEntryStart);
+
+    for (;OtherExitItr < OtherEntryStart && EntryItr < EntryStart; OtherExitItr++, EntryItr++) {
+      if(*OtherExitItr != *EntryItr)
+        return None;
+    }
+   
+    unsigned LenFromThis = Calls.rend() - EntryItr;
+    unsigned LenFromOther = Other.Calls.end() - OtherExitItr;
+
+    CallSiteList NewCalls(LenFromThis + LenFromOther);
+    copy(Calls.begin(), Calls.begin() + LenFromThis, std::back_inserter(NewCalls));
+    copy(Other.Calls.begin(), Other.Calls.begin() + LenFromOther, std::back_inserter(NewCalls));
+    unsigned NewIndex = EntryStartIndex + (OtherEntryStart - OtherExitItr);
+    
+    return AliasContext(NewCalls, NewIndex);
+  }
+};
+
 struct WorkListItem {
   InstantiatedValue From;
   InstantiatedValue To;
