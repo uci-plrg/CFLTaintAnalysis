@@ -53,25 +53,17 @@ using namespace PatternMatch;
 struct ExternalVals {
   SmallVector<Value *, 4> RetVals;
   SmallVector<Value *, 4> VAArgs;
-  SmallVector<Value *, 4> ActualArgs;
-
-  void sort() {
-	llvm::sort(RetVals);
-    llvm::sort(VAArgs);
-    llvm::sort(ActualArgs);
-  }
 };
 
 template <typename CFLAA> class CFLGraphBuilder {
   // Input of the builder
   CFLAA &Analysis;
   const TargetLibraryInfo &TLI;
-  const bool IsVarArg;
-  const Function &CurFn;
 
   // Output of the builder
   CFLGraph Graph;
-  ExternalVals ExtVals;
+  DenseMap<Function *, ExternalVals> ExtValMap;
+  DenseMap<Function *, SmallVector<CallSite, 8>> CallSiteMap;
 
   // Helper class
   /// Gets the edges our graph should have, based on an Instruction*
@@ -79,12 +71,12 @@ template <typename CFLAA> class CFLGraphBuilder {
     CFLAA &AA;
     const DataLayout &DL;
     const TargetLibraryInfo &TLI;
-    const bool IsVarArg;
-    const Function& CurFn;
+    const Function& Fn;
 
 
     CFLGraph &Graph;
     ExternalVals &ExtVals;
+    DenseMap<Function *, SmallVector<CallSite, 8>> &CallSiteMap;
 
     static bool hasUsefulEdges(ConstantExpr *CE) {
       // ConstantExpr doesn't have terminators, invokes, or fences, so only
@@ -219,8 +211,8 @@ template <typename CFLAA> class CFLGraphBuilder {
     void addStoreEdge(Value *From, Value *To) { addDerefEdge(From, To, false); }
 
   public:
-    GetEdgesVisitor(CFLGraphBuilder &Builder, const DataLayout &DL)
-        : AA(Builder.Analysis), DL(DL), TLI(Builder.TLI), IsVarArg(Builder.IsVarArg), CurFn(Builder.CurFn), Graph(Builder.Graph), ExtVals(Builder.ExtVals){}
+    GetEdgesVisitor(CFLGraphBuilder &Builder, Function &Fn)
+        : AA(Builder.Analysis), DL(Fn.getParent()->getDataLayout()), TLI(Builder.TLI), Fn(Fn), Graph(Builder.Graph), ExtVals(Builder.ExtValMap[&Fn]), CallSiteMap(Builder.CallSiteMap){}
 
     void visitInstruction(Instruction &) {
       llvm_unreachable("Unsupported instruction encountered");
@@ -333,88 +325,6 @@ template <typename CFLAA> class CFLGraphBuilder {
 		return Fn->isDeclaration() || Fn->isInterposable();
     }
 
-    bool tryInterproceduralAnalysis(CallSite CS,
-                                    const SmallVectorImpl<Function *> &Fns) {
-      
-      assert(Fns.size() > 0);
-
-      if (CS.arg_size() > MaxSupportedArgsInSummary)
-        return false;
-
-      // Exit early if we'll fail anyway
-      for (auto *Fn : Fns) {
-        if (isFunctionExternal(Fn)) {
-          return false;
-		}
-        // Fail if the caller does not provide enough arguments
-        assert(Fn->arg_size() <= CS.arg_size());
-        if (!AA.getSummary(*Fn)) {
-	      //errs() << "possible recursive call to " << Fn->getName() << "\n";
-          return false;
-		}
-      }
-
-      for (auto *Fn : Fns) {
-        auto Summary = AA.getSummary(*Fn);
-        assert(Summary != nullptr);
-	    
-		if(Fn->isVarArg() && CS.arg_size() > Fn->arg_size() + 1) {
-		   //errs() << "call to vararg function: " << *CS.getInstruction() << "\n";
-		   //Currently variadic arguments cannot be modelled precisely due to
-		   //bitcasts while retrieving var args changing the maximum pointer level
-		   for (auto i = Fn->arg_size(); i != CS.arg_size(); i++) {
-			auto Arg = CS.getArgument(i);
-			if(Arg->getType()->isPointerTy()) {
-			  //Graph.addAttr(InstantiatedValue{Arg, 0}, getAttrEscaped());
-			  //if(Graph.getCurMaxLevel(Arg) > 0)
-			  //  Graph.addAttr(InstantiatedValue{Arg, 1}, getAttrUnknown());
-			}
-		   }
-		   //unsigned VAStart = Fn->arg_size();
-           //auto i = VAStart;
-		   //auto ArgNode = InstantiatedValue{CS.getArgument(i), 0};
-		   //Graph.addNode(ArgNode);
-		   //for(unsigned j = VAStart + 1; j != CS.arg_size(); i++, j++) {
-		   // auto ArgNextNode = InstantiatedValue{CS.getArgument(j), 0};
-		   // Graph.addNode(ArgNextNode);
-		   // Graph.addEdge(ArgNode, ArgNextNode);
-		   // ArgNode = ArgNextNode;
-		   //}
-		   //Graph.addEdge(ArgNode, InstantiatedValue{CS.getArgument(VAStart), 0});
-
-		}
-
-        auto &RetParamRelations = Summary->RetParamRelations;
-        for (auto &Relation : RetParamRelations) {
-          auto IRelation = instantiateExternalRelation(Relation, CS);
-          if (IRelation.hasValue()) {
-            Graph.addNode(IRelation->From);
-            Graph.addNode(IRelation->To);
-            Graph.addEdge(IRelation->From, IRelation->To);
-          }
-        }
-
-        auto &RetParamAttributes = Summary->RetParamAttributes;
-        for (auto &Attribute : RetParamAttributes) {
-          auto IAttr = instantiateExternalAttribute(Attribute, CS);
-          if (IAttr.hasValue())
-            Graph.addNode(IAttr->IValue, IAttr->Attr);
-        }
-        auto &RetParamTaints = Summary->RetParamTaints;
-        for (auto &Taint : RetParamTaints) {
-          auto ITaint = instantiateExternalTaint(Taint, CS);
-          if (ITaint.hasValue()) {
-            Graph.addNode(ITaint->IValue, AliasAttrs(), ITaint->TaintStates);
-            //errs() << "from taint summary " << ITaint->IValue << " with " << ITaint->TaintStates.to_string() << "\n";
-          }
-        }
-      }
-	  //errs() << "------------------------------------------------------\n";
-	  //errs() << "back to building " << getDemangledName(CurFn) << "\n\n";
-      return true;
-    }
-
-
     void visitCallSite(CallSite CS) {
       auto Inst = CS.getInstruction();
 
@@ -422,13 +332,12 @@ template <typename CFLAA> class CFLGraphBuilder {
       for (Value *V : CS.args()) {
         if (V->getType()->isPointerTy()) {
           addNode(V);
-          ExtVals.ActualArgs.push_back(V);
 		}
 	  }
       if (Inst->getType()->isPointerTy())
         addNode(Inst);
 	  
-      if(IsVarArg &&
+      if(Fn.isVarArg() &&
 		 isa<VAStartInst>(Inst)) {
 		 ExtVals.VAArgs.push_back(CS.getArgOperand(0));
 		return;
@@ -441,8 +350,10 @@ template <typename CFLAA> class CFLGraphBuilder {
       // attributes that we can tack on.
       SmallVector<Function *, 4> Targets;
       if (getPossibleTargets(CS, Targets)) {
-        if (tryInterproceduralAnalysis(CS, Targets))
-          return;
+        for (const auto Target: Targets) {
+           CallSiteMap[Target].push_back(CS);
+        }
+        return;
 	  }
 
 	  //errs() << "unhandled call instruction  " << *Inst << "\n"; 
@@ -648,30 +559,61 @@ template <typename CFLAA> class CFLGraphBuilder {
 
   // Builds the graph needed for constructing the StratifiedSets for the given
   // function
+
+  void addCallEdges(CallSite CS, Function *Callee) {
+    auto CallInstr = CS.getInstruction();
+    auto ExtVals = ExtValMap[Callee];
+    for (const auto RetVal: ExtVals.RetVals) 
+      Graph.addRetEdge(InstantiatedValue{RetVal, 0}, InstantiatedValue{CallInstr, 0}, CS);
+    for (unsigned ArgNo = 0; ArgNo < Callee->arg_size(); ArgNo++) {
+       auto ActualArgVal = CS.getArgument(ArgNo);
+       if(!ActualArgVal->getType()->isPointerTy())
+         continue;
+       auto FormalArgVal = (Argument *)(Callee->arg_begin() + ArgNo);
+       if(!FormalArgVal->getType()->isPointerTy())
+         continue;
+       auto FormalArg = InstantiatedValue{FormalArgVal, 0};
+       auto ActualArg = InstantiatedValue{ActualArgVal, 0};
+       Graph.addArgEdge(ActualArg, FormalArg, CS);
+    }
+  }
+
   void buildGraphFrom(Function &Fn) {
-    GetEdgesVisitor Visitor(*this, Fn.getParent()->getDataLayout());
+    errs() << "------------------------------------\n";
+    errs() << "building graph for " << Fn.getName() << "\n";
+    GetEdgesVisitor Visitor(*this, Fn);
 
     for (auto &Bb : Fn.getBasicBlockList())
       for (auto &Inst : Bb.getInstList())
         addInstructionToGraph(Visitor, Inst);
-
+    
     for (auto &Arg : Fn.args())
       addArgumentToGraph(Arg);
-    
-    ExtVals.sort();
+   
   }
 
+  void buildGraphFrom(Module &Mod) {
+    for (auto &Fn : Mod.getFunctionList())
+      buildGraphFrom(Fn);
+
+    for (auto &Mapping : CallSiteMap) {
+      auto Callee = Mapping.first;
+      for (auto &CS : Mapping.second)
+        addCallEdges(CS, Callee);
+    }
+
+    CallSiteMap.clear();
+    ExtValMap.clear();
+  }
+
+
+
 public:
-  CFLGraphBuilder(CFLAA &Analysis, const TargetLibraryInfo &TLI, Function &Fn) : Analysis(Analysis), TLI(TLI), IsVarArg(Fn.isVarArg()), CurFn(Fn) {
-    buildGraphFrom(Fn);
+  CFLGraphBuilder(CFLAA &Analysis, const TargetLibraryInfo &TLI, Module &Mod) : Analysis(Analysis), TLI(TLI)  {
+    buildGraphFrom(Mod);
   }
 
   CFLGraph &getCFLGraph() { return Graph; }
-
-  const ExternalVals &getExternalVals() const {
-    return ExtVals;
-  }
-
 
 };
 

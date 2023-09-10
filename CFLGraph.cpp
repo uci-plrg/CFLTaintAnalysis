@@ -111,6 +111,25 @@ CFLGraph::CFLGraph() {}
 
   }
 
+  void CFLGraph::addArgEdge(Node From, Node To, CallSite CS) {
+    auto *FromInfo = getNode(From);
+    assert(FromInfo != nullptr);
+    auto *ToInfo = getNode(To);
+    assert(ToInfo != nullptr);
+
+    FromInfo->ArgEdges.push_back(CallEdge{To, CS});
+    ToInfo->ReverseArgEdges.push_back(CallEdge{From, CS}); 
+  }
+
+  void CFLGraph::addRetEdge(Node From, Node To, CallSite CS) {
+    auto *FromInfo = getNode(From);
+    assert(FromInfo != nullptr);
+    auto *ToInfo = getNode(To);
+    assert(ToInfo != nullptr);
+
+    FromInfo->RetEdges.push_back(CallEdge{To, CS});
+  }
+
   const CFLGraph::NodeInfo *CFLGraph::getNode(Node N) const {
     auto Itr = ValueImpls.find(N.Val);
     if (Itr == ValueImpls.end() || Itr->second.getNumLevels() <= N.DerefLevel)

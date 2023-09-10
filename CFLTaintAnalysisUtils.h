@@ -46,8 +46,7 @@ private:
 
 static inline const Function *parentFunctionOfValue(const Value *Val) {
   if (auto *Inst = dyn_cast<Instruction>(Val)) {
-    auto *Bb = Inst->getParent();
-    return Bb->getParent();
+    return Inst->getFunction();
   }
 
   if (auto *Arg = dyn_cast<Argument>(Val))

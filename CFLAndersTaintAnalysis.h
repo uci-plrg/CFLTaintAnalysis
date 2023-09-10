@@ -42,40 +42,11 @@ public:
   CFLAndersTaintResult(CFLAndersTaintResult &&RHS);
   ~CFLAndersTaintResult();
 
-  /// Handle invalidation events from the new pass manager.
-  /// By definition, this result is stateless and so remains valid.
-  bool invalidate(Function &, const PreservedAnalyses &,
-                  FunctionAnalysisManager::Invalidator &) {
-    return false;
-  }
-
-  /// Evict the given function from cache
-  void evict(const Function *Fn);
-
-  
-  /// Get the summary for the given function
-  /// Return nullptr if the summary is not found or not available
-  const cflta::AliasSummary *getSummary(const Function &);
-
-  AliasResult query(const MemoryLocation &, const MemoryLocation &);
-  AliasResult alias(const MemoryLocation &, const MemoryLocation &);
-
-  const Optional<std::vector<const Value *>> allValueAliases(const Value *);  
-
   Optional<DenseSet<Value *>> taintedVals(const Function &Fn);
-  
-  DenseMap<const Function*, DenseSet<Value *>> taintedValsInReachableFuncs(const Function &Fn); 
+  DenseMap<const Function *, DenseSet<Value *>> taintedValsInReachableFuncs(const Function &Fn);
+  void buildInfoFrom(const Module &);
 
 private:
-  /// Ensures that the given function is available in the cache.
-  /// Returns the appropriate entry from the cache.
-  const Optional<FunctionInfo> &ensureCached(const Function &);
-
-  /// Inserts the given Function into the cache.
-  void scan(const Function &);
-
-  /// Build summary for a given function
-  FunctionInfo buildInfoFrom(const Function &);
   const TargetLibraryInfo &TLI;
 
   /// Cached mapping of Functions to their StratifiedSets.
@@ -83,13 +54,8 @@ private:
   /// in the cache as an Optional without a value. This way, if we
   /// have any kind of recursion, it is discernable from a function
   /// that simply has empty sets.
-  DenseMap<const Function *, Optional<FunctionInfo>> Cache;
   
-  cflta::InterprocTaintInfo ITI;
-  
-  void propagateInterprocTaint(const Function &); 
-  
-  std::forward_list<cflta::FunctionHandle<CFLAndersTaintResult>> Handles;
+  DenseMap<const Function *, DenseSet<Value *>> TaintedValMap; 
 };
 
 /// Analysis pass providing a never-invalidated alias analysis result.

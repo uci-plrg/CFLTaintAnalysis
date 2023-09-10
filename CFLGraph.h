@@ -45,10 +45,18 @@ public:
     int64_t Offset;
   };
 
+   //function arguments can propagate aliases both in and out of functions, return values can only propagate out of functions. 
+  struct CallEdge {
+    Node Other;
+    CallSite CS; 
+  };
+
   using EdgeList = std::vector<Edge>;
+  using CallEdgeList = std::vector<CallEdge>;
 
   struct NodeInfo {
     EdgeList Edges, ReverseEdges;
+    CallEdgeList ArgEdges, ReverseArgEdges, RetEdges;
     AliasAttrs Attr;
   };
 
@@ -88,6 +96,10 @@ public:
   void addAttr(Node N, AliasAttrs Attr);
 
   void addEdge(Node From, Node To, int64_t Offset = 0);
+  
+  void addArgEdge(Node From, Node To, CallSite CS);
+  
+  void addRetEdge(Node From, Node To, CallSite CS);
 
   const NodeInfo *getNode(Node N) const;  
 
