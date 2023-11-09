@@ -78,7 +78,6 @@ using StateSet = std::bitset<7>;
 static inline StateSet toStateSet(MatchState State) {
   return StateSet(1U << static_cast<uint8_t>(State));
 }
-
 //===----------------------------------------------------------------------===//
 // AliasAttr related stuffs
 //===----------------------------------------------------------------------===//

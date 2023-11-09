@@ -230,6 +230,56 @@ static inline StateSet composeStateSets(StateSet First, StateSet Second) {
    return Res;
 }
 
+//===----------------------------------------------------------------------===//
+// CallContext related stuff
+//===----------------------------------------------------------------------===//
+enum CallContext: uint8_t
+{
+  Call,
+  Return,
+  ReturnCall,
+  Normal,
+};
+
+using ContextSet = std::bitset<3>;
+
+static inline ContextSet toContextSet (CallContext Context) {
+  return ContextSet(1U << static_cast<uint8_t>(Context));
+}
+
+static inline Optional<CallContext> composeCallContexts (CallContext First, CallContext Second) {
+  if (First == CallContext::Normal)
+    return Second;
+  if (Second == CallContext::Normal)
+    return First;
+  if (First == CallContext::Call && Second == CallContext::Call)
+    return First;
+  if (First == CallContext::Return && Second == CallContext::Return)
+    return First;
+  if (First == CallContext::Return && Second == CallContext::ReturnCall)
+    return Second;
+  return None;
+}
+
+static inline ContextSet composeContextSets(ContextSet First, ContextSet Second) {
+   ContextSet Res;
+
+   if (First.test(static_cast<uint8_t>(CallContext::Normal)))
+     Res &= Second;
+   if (Second.test(static_cast<uint8_t>(CallContext::Normal)))
+     Res &= First;
+   if (First.test(static_cast<uint8_t>(CallContext::Call)) && Second.test(static_cast<uint8_t>(CallContext::Call)))
+     Res.set(CallContext::Call);
+   if (First.test(static_cast<uint8_t>(CallContext::Return)) && Second.test(static_cast<uint8_t>(CallContext::Return)))
+     Res.set(CallContext::Return);
+   if ((First.test(static_cast<uint8_t>(CallContext::Return)) && Second.test(static_cast<uint8_t>(CallContext::Call))) || 
+       (First.test(static_cast<uint8_t>(CallContext::ReturnCall)) && Second.test(static_cast<uint8_t>(CallContext::Call))) || 	   
+       (First.test(static_cast<uint8_t>(CallContext::Return)) && Second.test(static_cast<uint8_t>(CallContext::ReturnCall))))
+     Res.set(CallContext::ReturnCall);
+
+   return Res;
+}
+
 // A pair that consists of a value and an offset
 struct OffsetValue {
   const Value *Val;
@@ -374,47 +424,12 @@ public:
   }
 };
 
-
-class AliasContext {
-  using CallSiteList = SmallVector<CallSite, 8>;
-  CallSiteList Calls;
-  unsigned EntryStartIndex;
-  //Bounding number of entries only reduces precision, whereas bounding number of exits compromises soundness
-  const static unsigned MaxEntryLength = 10;
-
-public:
-  AliasContext(CallSiteList Calls, unsigned EntryStartIndex = 0): Calls(Calls), EntryStartIndex(EntryStartIndex) {}
-
-  Optional<AliasContext> composeWith(AliasContext &Other) {
-    auto EntryItr = Calls.rbegin();
-    auto EntryStart = Calls.rend() - EntryStartIndex;
-    assert(EntryItr <= EntryStart);
- 
-    auto OtherExitItr = Other.Calls.begin();
-    auto OtherEntryStart = Other.Calls.begin() + Other.EntryStartIndex;
-    assert(OtherExitItr <= OtherEntryStart);
-
-    for (;OtherExitItr < OtherEntryStart && EntryItr < EntryStart; OtherExitItr++, EntryItr++) {
-      if(*OtherExitItr != *EntryItr)
-        return None;
-    }
-   
-    unsigned LenFromThis = Calls.rend() - EntryItr;
-    unsigned LenFromOther = Other.Calls.end() - OtherExitItr;
-
-    CallSiteList NewCalls(LenFromThis + LenFromOther);
-    copy(Calls.begin(), Calls.begin() + LenFromThis, std::back_inserter(NewCalls));
-    copy(Other.Calls.begin(), Other.Calls.begin() + LenFromOther, std::back_inserter(NewCalls));
-    unsigned NewIndex = EntryStartIndex + (OtherEntryStart - OtherExitItr);
-    
-    return AliasContext(NewCalls, NewIndex);
-  }
-};
-
 struct WorkListItem {
   InstantiatedValue From;
   InstantiatedValue To;
   MatchState State;
+  CallContext Context;
+  bool SameContextOnly;
 };
 
 } // end anonymous namespace
@@ -473,14 +488,15 @@ template <> struct DenseMapInfo<OffsetInstantiatedValue> {
 
 
 static void propagate(InstantiatedValue From, InstantiatedValue To,
-                      MatchState State, ReachabilitySet &ReachSet,
+                      MatchState State, CallContext Context, bool SameContextOnly,
+		      ReachabilitySet &ReachSet,
                       std::vector<WorkListItem> &WorkList) {
   if (From == To)
     return;
   if (ReachSet.insert(From, To, State)) {
     if(isa<ConstantPointerNull>(To.Val))
 		return;
-    WorkList.push_back(WorkListItem{From, To, State});
+    WorkList.push_back(WorkListItem{From, To, State, Context, SameContextOnly});
   }
 
 }
@@ -522,7 +538,7 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
   auto FromNodeBelow = getNodeBelow(Graph, FromNode);
   auto ToNodeBelow = getNodeBelow(Graph, ToNode);
   
-  if(FromNodeBelow && ToNodeBelow && MemSet.insert(*FromNodeBelow, *ToNodeBelow)) {
+  if (FromNodeBelow && ToNodeBelow && MemSet.insert(*FromNodeBelow, *ToNodeBelow)) {
     ReachSet.insert(*FromNodeBelow, *ToNodeBelow, MatchState::FlowFromMemAliasNoReadWrite);
     for (const auto &Mapping : ReachSet.revReachableValueAliases(*FromNodeBelow)) {
       auto MemAliasPropagate = [&](MatchState FromState, MatchState ToState) {
@@ -613,8 +629,8 @@ static void exploreFromNode(InstantiatedValue Node, const CFLGraph &Graph,
   }
 
   while (!WorkList.empty()) {
-    for (const auto &Item : WorkList) {
-      processWorkListItem(Item, Graph, ReachSet, MemSet, NextList);
+    for (auto Itr = WorkList.rbegin(); Itr != WorkList.rend(); Itr++) {
+      processWorkListItem(*Itr, Graph, ReachSet, MemSet, NextList);
     }
     NextList.swap(WorkList);
     NextList.clear();
@@ -706,10 +722,10 @@ static RegisterPass<CFLAndersTaintWrapperPass> X("cfl-anders-taint", "Inclusion-
 
 
 bool CFLAndersTaintWrapperPass::runOnModule(Module &M) {
-    auto &TLIWP = getAnalysis<TargetLibraryInfoWrapperPass>();
-	Result.reset(new CFLAndersTaintResult(TLIWP.getTLI()));
-    Result->buildInfoFrom(M);
-	return true;
+  auto &TLIWP = getAnalysis<TargetLibraryInfoWrapperPass>();
+  Result.reset(new CFLAndersTaintResult(TLIWP.getTLI()));
+  Result->buildInfoFrom(M);
+  return true;
 }
 
 CFLAndersTaintWrapperPass::CFLAndersTaintWrapperPass() : ModulePass(ID) {
