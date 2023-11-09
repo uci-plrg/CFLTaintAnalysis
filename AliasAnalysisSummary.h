@@ -38,6 +38,8 @@
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/CallSite.h"
+#include "llvm/IR/DataLayout.h" 
+#include "llvm/IR/Operator.h"
 #include <bitset>
 #include <variant>
 
@@ -182,6 +184,14 @@ inline int64_t addOffset(int64_t LHS, int64_t RHS) {
     return UnknownOffset;
   // FIXME: Do we need to guard against integer overflow here?
   return LHS + RHS;
+}
+
+static uint64_t getGEPOffset(const GEPOperator &GEPOp, const DataLayout &DL) {
+	uint64_t Offset = UnknownOffset;
+	APInt APOffset(DL.getPointerSizeInBits(GEPOp.getPointerAddressSpace()), 0);
+	if (GEPOp.accumulateConstantOffset(DL, APOffset) && APOffset.getSExtValue() >= 0)
+	  Offset = APOffset.getSExtValue();
+	return Offset;
 }
 
 /// We use ExternalRelation to describe an externally visible aliasing relations

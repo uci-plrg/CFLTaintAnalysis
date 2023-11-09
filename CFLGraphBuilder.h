@@ -55,6 +55,8 @@ struct ExternalVals {
   SmallVector<Value *, 4> VAArgs;
 };
 
+  using GEPMapType =  DenseMap<StructType *, DenseMap<unsigned, SmallVector<GEPOperator *, 4>>>;
+
 template <typename CFLAA> class CFLGraphBuilder {
   // Input of the builder
   CFLAA &Analysis;
@@ -64,6 +66,8 @@ template <typename CFLAA> class CFLGraphBuilder {
   CFLGraph Graph;
   DenseMap<Function *, ExternalVals> ExtValMap;
   DenseMap<Function *, SmallVector<CallSite, 8>> CallSiteMap;
+  // TODO: alternatively try std::multimap
+  GEPMapType GEPMap;
 
   // Helper class
   /// Gets the edges our graph should have, based on an Instruction*
@@ -77,6 +81,7 @@ template <typename CFLAA> class CFLGraphBuilder {
     CFLGraph &Graph;
     ExternalVals &ExtVals;
     DenseMap<Function *, SmallVector<CallSite, 8>> &CallSiteMap;
+    GEPMapType &GEPMap;
 
     static bool hasUsefulEdges(ConstantExpr *CE) {
       // ConstantExpr doesn't have terminators, invokes, or fences, so only
@@ -212,7 +217,7 @@ template <typename CFLAA> class CFLGraphBuilder {
 
   public:
     GetEdgesVisitor(CFLGraphBuilder &Builder, Function &Fn)
-        : AA(Builder.Analysis), DL(Fn.getParent()->getDataLayout()), TLI(Builder.TLI), Fn(Fn), Graph(Builder.Graph), ExtVals(Builder.ExtValMap[&Fn]), CallSiteMap(Builder.CallSiteMap){}
+        : AA(Builder.Analysis), DL(Fn.getParent()->getDataLayout()), TLI(Builder.TLI), Fn(Fn), Graph(Builder.Graph), ExtVals(Builder.ExtValMap[&Fn]), CallSiteMap(Builder.CallSiteMap), GEPMap(Builder.GEPMap){}
 
     void visitInstruction(Instruction &) {
       llvm_unreachable("Unsupported instruction encountered");
@@ -234,9 +239,9 @@ template <typename CFLAA> class CFLGraphBuilder {
     }
 
     void visitPtrToIntInst(PtrToIntInst &Inst) {
-	  auto PTIOp = cast<PtrToIntOperator>(&Inst);
-	  if(handlePtrToInt(PTIOp))
-		return;
+     auto PTIOp = cast<PtrToIntOperator>(&Inst);
+     if(handlePtrToInt(PTIOp))
+	return;
       auto *Ptr = Inst.getOperand(0);
       addNode(Ptr/*, getAttrEscaped()*/);
     }
@@ -279,14 +284,20 @@ template <typename CFLAA> class CFLGraphBuilder {
     }
 
     void visitGEP(GEPOperator &GEPOp) {
-      uint64_t Offset = UnknownOffset;
-      APInt APOffset(DL.getPointerSizeInBits(GEPOp.getPointerAddressSpace()),
-                     0);
-      if (GEPOp.accumulateConstantOffset(DL, APOffset))
-        Offset = APOffset.getSExtValue();
+      if(!GEPOp.getType()->isPointerTy())
+        return;
+      uint64_t Offset = getGEPOffset(GEPOp, DL); 
 
       auto *Op = GEPOp.getPointerOperand();
-      addAssignEdge(Op, &GEPOp, Offset);
+      if (auto *StructTy = dyn_cast<StructType>(GEPOp.getSourceElementType())) {
+	errs() << "1\n";
+	addNode(&Op);
+	addNode(&GEPOp);
+        GEPMap[StructTy][Offset].push_back(&GEPOp);
+      } else {
+	errs() << "2\n";
+        addAssignEdge(Op, &GEPOp, Offset);
+      }
     }
 
     void visitGetElementPtrInst(GetElementPtrInst &Inst) {
@@ -606,11 +617,13 @@ template <typename CFLAA> class CFLGraphBuilder {
     ExtValMap.clear();
   }
 
-
-
 public:
   CFLGraphBuilder(CFLAA &Analysis, const TargetLibraryInfo &TLI, Module &Mod) : Analysis(Analysis), TLI(TLI)  {
     buildGraphFrom(Mod);
+  }
+
+  const GEPMapType &getGEPMap() {
+    return GEPMap;
   }
 
   CFLGraph &getCFLGraph() { return Graph; }

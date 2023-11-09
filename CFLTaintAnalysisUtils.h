@@ -13,10 +13,10 @@
 #ifndef LLVM_ANALYSIS_CFLTAINTANALYSISUTILS_H
 #define LLVM_ANALYSIS_CFLTAINTANALYSISUTILS_H
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/ValueHandle.h"
-#include "llvm/ADT/DenseSet.h"
 
 #include <cxxabi.h>
 
@@ -52,39 +52,6 @@ static inline const Function *parentFunctionOfValue(const Value *Val) {
   if (auto *Arg = dyn_cast<Argument>(Val))
     return Arg->getParent();
   return nullptr;
-}
-
-//TODO: check 
-static inline Optional<unsigned> searchForNestedTypeUpTo(const Type *T, const Type *T2, unsigned Level) {
-  std::function<Optional<unsigned>(unsigned, const Type *)> search = [&] (unsigned CurLevel, const Type *T) {
-     if(T2 == T)
-       return Optional<unsigned>(CurLevel);
-     if(CurLevel == Level)
-       return Optional<unsigned>();
-    auto ArType = dyn_cast<ArrayType>(T);
-    auto PtrType = dyn_cast<PointerType>(T);
-    for (; PtrType || ArType; ArType = dyn_cast<ArrayType>(T), PtrType = dyn_cast<PointerType>(T)) {
-     if(PtrType) {
-       CurLevel++;
-  	   T = PtrType->getPointerElementType();
-     } else {
-       T = ArType->getElementType();
-	 }
-     if(T2 == T)
-       return Optional<unsigned>(CurLevel);
-     if(CurLevel == Level)
-       return Optional<unsigned>();
-    }
-    if (auto StrType = dyn_cast<StructType>(T)) {
-      for (auto Element: StrType->elements()) {
-        auto Res = search(CurLevel, Element);
-        if(Res)
-          return Res;
-      }
-    }
-    return Optional<unsigned>();
-  };
-  return search(0, T); 
 }
 
 static inline unsigned maxDerefLevel(const Value* V) {

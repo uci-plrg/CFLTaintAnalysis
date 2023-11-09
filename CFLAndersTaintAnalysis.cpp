@@ -72,6 +72,7 @@
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Type.h"
@@ -280,6 +281,15 @@ static inline ContextSet composeContextSets(ContextSet First, ContextSet Second)
    return Res;
 }
 
+template<typename T>
+class ContextMap {
+  T Map[4];
+public:
+  T &operator[] (CallContext Context) {
+    return Map[static_cast<uint8_t>(Context)];
+  }
+};
+
 // A pair that consists of a value and an offset
 struct OffsetValue {
   const Value *Val;
@@ -378,7 +388,7 @@ class AliasMemSet {
 public:
   using const_mem_iterator = MemSet::const_iterator;
 
-  bool insert(InstantiatedValue LHS, InstantiatedValue RHS) {
+  bool insert(InstantiatedValue LHS, InstantiatedValue RHS, CallContext Context) {
     // Top-level values can never be memory aliases because one cannot take the
     // addresses of them
     //assert(LHS.DerefLevel > 0 && RHS.DerefLevel > 0);
@@ -488,7 +498,7 @@ template <> struct DenseMapInfo<OffsetInstantiatedValue> {
 
 
 static void propagate(InstantiatedValue From, InstantiatedValue To,
-                      MatchState State, CallContext Context, bool SameContextOnly,
+                      MatchState State,
 		      ReachabilitySet &ReachSet,
                       std::vector<WorkListItem> &WorkList) {
   if (From == To)
@@ -496,7 +506,7 @@ static void propagate(InstantiatedValue From, InstantiatedValue To,
   if (ReachSet.insert(From, To, State)) {
     if(isa<ConstantPointerNull>(To.Val))
 		return;
-    WorkList.push_back(WorkListItem{From, To, State, Context, SameContextOnly});
+    WorkList.push_back(WorkListItem{From, To, State});
   }
 
 }
@@ -538,11 +548,11 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
   auto FromNodeBelow = getNodeBelow(Graph, FromNode);
   auto ToNodeBelow = getNodeBelow(Graph, ToNode);
   
-  if (FromNodeBelow && ToNodeBelow && MemSet.insert(*FromNodeBelow, *ToNodeBelow)) {
+  if (FromNodeBelow && ToNodeBelow && MemSet.insert(*FromNodeBelow, *ToNodeBelow, Item.Context)) {
     ReachSet.insert(*FromNodeBelow, *ToNodeBelow, MatchState::FlowFromMemAliasNoReadWrite);
     for (const auto &Mapping : ReachSet.revReachableValueAliases(*FromNodeBelow)) {
       auto MemAliasPropagate = [&](MatchState FromState, MatchState ToState) {
-		auto Src = Mapping.first;
+	auto Src = Mapping.first;
         if (Mapping.second.test(static_cast<size_t>(FromState))) {
           propagate(Src, *ToNodeBelow, ToState, ReachSet, WorkList);
         }
@@ -659,21 +669,61 @@ static void processWorkList(ReachabilitySet &ReachSet,
   }
 }
 
-void buildTaintedValMap(DenseMap<const Function *, DenseSet<Value *>> &TaintedValMap, const TaintedSet &TaintSources, const ValueReachMap &ReachMap) {
-  for(const auto &Mapping: TaintSources) {
+const TaintedSet buildTaintedValMap(DenseMap<const Function *, DenseSet<Value *>> &TaintedValMap, const TaintedSet &TaintSources, const ValueReachMap &ReachMap, const GEPMapType &GEPMap) {
+  TaintedSet NewTaintSources;
+  for (const auto &Mapping: TaintSources) {
     auto IVal = Mapping.first;
     auto Fn = parentFunctionOfValue(IVal.Val);
-    if(IVal.DerefLevel == 0 && Fn) {
+    if (IVal.DerefLevel == 0 && Fn) {
       TaintedValMap[Fn].insert(IVal.Val);
     } 
-    for(const auto &AliasMapping: ReachMap.reachableValueAliases(IVal)) {
+    for (const auto &AliasMapping: ReachMap.reachableValueAliases(IVal)) {
       auto Alias = AliasMapping.first;
       auto AliasFn = parentFunctionOfValue(Alias.Val);
-      if(Alias.DerefLevel == 0 && AliasFn) {
-        TaintedValMap[AliasFn].insert(Alias.Val);
-      } 
+      if (Alias.DerefLevel != 0 || !AliasFn)
+	continue;
+      
+      TaintedValMap[AliasFn].insert(Alias.Val);
+
+      auto AddField = [&] (StructType *StructTy, uint64_t Offset) {
+	auto StructItr = GEPMap.find(StructTy);
+	if (StructItr == GEPMap.end()) 
+          return;
+
+	auto OffsetItr = StructItr->second.find(Offset);
+	if (OffsetItr ==StructItr->second.end()) 
+	  return;
+
+	for (auto *GEPOpAlias: OffsetItr->second)
+	  NewTaintSources[InstantiatedValue{GEPOpAlias, 0}] = AliasMapping.second;
+      };
+
+      auto AddAllFields = [&] (StructType *StructTy) {
+	auto StructItr = GEPMap.find(StructTy);
+	if (StructItr == GEPMap.end()) 
+          return;
+
+	for (auto &Mapping: StructItr->second)
+	  for (auto &GEPOpAlias: Mapping.second)
+	    NewTaintSources[InstantiatedValue{GEPOpAlias, 0}] = AliasMapping.second;
+      };
+
+      auto DL = AliasFn->getParent()->getDataLayout();
+      if (auto *GEPOp = dyn_cast<GEPOperator>(Alias.Val)) {
+        if (auto *StructTy = dyn_cast<StructType>(GEPOp->getSourceElementType())) {
+	  uint64_t Offset = getGEPOffset(*GEPOp, DL);
+	  if (Offset == UnknownOffset)
+	    AddAllFields(StructTy);
+	  else
+	    AddField(StructTy, Offset);
+	}
+      }
+    
+      if (auto *StructTy = dyn_cast<StructType>(Alias.Val->getType()))
+	AddAllFields(StructTy);
     }
   }
+  return NewTaintSources;
 }
 
 void
@@ -684,16 +734,18 @@ CFLAndersTaintResult::buildInfoFrom(const Module &M) {
       const_cast<Module &>(M)
     );
   auto &Graph = GraphBuilder.getCFLGraph();
+  auto &GEPMap = GraphBuilder.getGEPMap();
   auto TaintSources = Graph.getTainted();
  
   ReachabilitySet ReachSet;
   AliasMemSet MemSet;
- 
-  processWorkList(ReachSet, MemSet, Graph, TaintSources);
-  
-  auto ReachMap = ReachSet.getReachMap();
 
-  buildTaintedValMap(TaintedValMap, TaintSources, ReachMap);
+  while(!TaintSources.empty()) {
+    processWorkList(ReachSet, MemSet, Graph, TaintSources); 
+    auto ReachMap = ReachSet.getReachMap();
+    auto NewTaintSources = buildTaintedValMap(TaintedValMap, TaintSources, ReachMap, GEPMap);
+    TaintSources.swap(NewTaintSources);
+  }
 }
 
 Optional<DenseSet<Value *>> CFLAndersTaintResult::taintedVals(const Function &Fn) {
