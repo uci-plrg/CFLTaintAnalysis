@@ -55,6 +55,7 @@ struct ExternalVals {
   SmallVector<Value *, 4> VAArgs;
 };
 
+//alternative: use multimap in the inner layer
 using GEPMapType =  DenseMap<StructType *, DenseMap<uint64_t, SmallVector<GEPOperator *, 4>>>;
 
 template <typename CFLAA> class CFLGraphBuilder {
@@ -66,7 +67,6 @@ template <typename CFLAA> class CFLGraphBuilder {
   CFLGraph Graph;
   DenseMap<Function *, ExternalVals> ExtValMap;
   DenseMap<Function *, SmallVector<CallSite, 8>> CallSiteMap;
-  // TODO: alternatively try std::multimap
   GEPMapType GEPMap;
 
   // Helper class

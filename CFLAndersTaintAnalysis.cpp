@@ -283,10 +283,46 @@ static inline ContextSet composeContextSets(ContextSet First, ContextSet Second)
 
 template<typename T>
 class ContextMap {
-  T Map[4];
+  static const uint8_t EnumSize = 4;
+  T Map[EnumSize];
 public:
+  class const_iterator {
+    uint8_t ContextInt;
+    const T *Value;
+    
+  public:
+    const_iterator(uint8_t ContextInt, const T *Value): ContextInt(ContextInt), Value(Value) {}
+    const_iterator() = default;
+
+    std::pair<CallContext, T> operator*() {
+      return std::make_pair(CallContext(ContextInt), *Value);
+    }
+
+    bool operator==(const_iterator Other) {
+      return Value == Other.Value && ContextInt == Other.ContextInt;
+    }
+
+    bool operator!=(const_iterator Other) {
+      return !(*this == Other);
+    }
+
+    const_iterator operator++() {
+      ContextInt++;
+      Value++;
+      return *this;
+    }
+  };
+
   T &operator[] (CallContext Context) {
     return Map[static_cast<uint8_t>(Context)];
+  }
+
+  const_iterator begin() const {
+    return const_iterator(0, &Map[0]);
+  }
+
+  const_iterator end() const {
+    return const_iterator(EnumSize, &Map[EnumSize]);
   }
 };
 
@@ -326,17 +362,17 @@ inline raw_ostream &operator<<(raw_ostream &OS, const OffsetInstantiatedValue &O
 // the paper) during the analysis.
 using ValueStateMap = DenseMap<InstantiatedValue, StateSet>;
 
-class ValueReachMap : public DenseMap<InstantiatedValue, ValueStateMap> {
+class ValueReachMap : public DenseMap<InstantiatedValue, ContextMap<ValueStateMap>> {
 public:
-  iterator_range<ValueStateMap::const_iterator>
+  iterator_range<ContextMap<ValueStateMap>::const_iterator>
   reachableValueAliases(InstantiatedValue V) const {
     auto Itr = find(V);
     //errs() << "reachableValueAliases for " << V << "\n";
     if (Itr == end()) {
-      return make_range<ValueStateMap::const_iterator>(ValueStateMap::const_iterator(),
-                                                       ValueStateMap::const_iterator());
+      return make_range<ContextMap<ValueStateMap>::const_iterator>(ContextMap<ValueStateMap>::const_iterator(),
+                                                       ContextMap<ValueStateMap>::const_iterator());
 	}
-    return make_range<ValueStateMap::const_iterator>(Itr->second.begin(),
+    return make_range<ContextMap<ValueStateMap>::const_iterator>(Itr->second.begin(),
                                                  Itr->second.end());
   }
 };
@@ -347,9 +383,9 @@ public:
   using const_value_iterator = ValueReachMap::const_iterator;
 
   // Insert edge 'From->To' at state 'State'
-  bool insert(InstantiatedValue From, InstantiatedValue To, MatchState State) {
+  bool insert(InstantiatedValue From, InstantiatedValue To, MatchState State, CallContext Context) {
     assert(From != To);
-    auto &RevStates = RevReachMap[To][From];
+    auto &RevStates = RevReachMap[To][Context][From];
     auto Idx = static_cast<size_t>(State);
     if (!RevStates.test(Idx)) {
       RevStates.set(Idx);
@@ -358,8 +394,9 @@ public:
     return false;
   }
 
-  // Return the set of all ('From', 'State') pair for a given node 'To'
-  iterator_range<ValueStateMap::const_iterator> revReachableValueAliases(InstantiatedValue V) const {
+  // Return the set of all (Context, 'From', 'State') tuples for a given node 'To'
+  iterator_range<ContextMap<ValueStateMap>::const_iterator>
+  revReachableValueAliases(InstantiatedValue V) const {
     return RevReachMap.reachableValueAliases(V);
   }
 
@@ -369,11 +406,11 @@ public:
 
   ValueReachMap getReachMap() const {
     ValueReachMap ReachMap;
-    for (const auto &Mapping: RevReachMap) {
-      for (const auto &Mapping2: Mapping.second)
-        ReachMap[Mapping2.first][Mapping.first] = Mapping2.second;
-    }
-	return ReachMap;
+    for (const auto &ToMapping: RevReachMap)
+      for (const auto &ContextMapping: ToMapping.second)
+	for (const auto &FromMapping: ContextMapping.second)
+          ReachMap[FromMapping.first][ContextMapping.first][ToMapping.first] = FromMapping.second;
+    return ReachMap;
   }
 };
 
@@ -381,7 +418,7 @@ public:
 // in the paper) during the analysis.
 class AliasMemSet {
   using MemSet = DenseSet<InstantiatedValue>;
-  using MemMapType = DenseMap<InstantiatedValue, MemSet>;
+  using MemMapType = DenseMap<InstantiatedValue, ContextMap<MemSet>>;
 
   MemMapType MemMap;
 
@@ -392,10 +429,10 @@ public:
     // Top-level values can never be memory aliases because one cannot take the
     // addresses of them
     //assert(LHS.DerefLevel > 0 && RHS.DerefLevel > 0);
-    return MemMap[LHS].insert(RHS).second;
+    return MemMap[LHS][Context].insert(RHS).second;
   }
 
-  const MemSet *getMemoryAliases(InstantiatedValue V) const {
+  const ContextMap<MemSet> *getMemoryAliases(InstantiatedValue V) const {
     auto Itr = MemMap.find(V);
     if (Itr == MemMap.end())
       return nullptr;
@@ -439,7 +476,6 @@ struct WorkListItem {
   InstantiatedValue To;
   MatchState State;
   CallContext Context;
-  bool SameContextOnly;
 };
 
 } // end anonymous namespace
@@ -498,15 +534,13 @@ template <> struct DenseMapInfo<OffsetInstantiatedValue> {
 
 
 static void propagate(InstantiatedValue From, InstantiatedValue To,
-                      MatchState State,
+                      MatchState State, CallContext Context, 
 		      ReachabilitySet &ReachSet,
                       std::vector<WorkListItem> &WorkList) {
-  if (From == To)
-    return;
-  if (ReachSet.insert(From, To, State)) {
+  if (From == To || ReachSet.insert(From, To, State, Context)) {
     if(isa<ConstantPointerNull>(To.Val))
 		return;
-    WorkList.push_back(WorkListItem{From, To, State});
+    WorkList.push_back(WorkListItem{From, To, State, Context});
   }
 
 }
@@ -541,7 +575,6 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
   // sorting FromNode and ToNode before insertion happens.
   // with returnEdges ReachSet and MemSet are no longer symmetric
 
-
   // The newly added value alias pair may potentially generate more memory
   // alias pairs. Check for them here. 
     
@@ -549,21 +582,19 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
   auto ToNodeBelow = getNodeBelow(Graph, ToNode);
   
   if (FromNodeBelow && ToNodeBelow && MemSet.insert(*FromNodeBelow, *ToNodeBelow, Item.Context)) {
-    ReachSet.insert(*FromNodeBelow, *ToNodeBelow, MatchState::FlowFromMemAliasNoReadWrite);
-    for (const auto &Mapping : ReachSet.revReachableValueAliases(*FromNodeBelow)) {
-      auto MemAliasPropagate = [&](MatchState FromState, MatchState ToState) {
-	auto Src = Mapping.first;
-        if (Mapping.second.test(static_cast<size_t>(FromState))) {
-          propagate(Src, *ToNodeBelow, ToState, ReachSet, WorkList);
-        }
-      };
-  
-      MemAliasPropagate(MatchState::FlowFromReadOnly,
-                        MatchState::FlowFromMemAliasReadOnly);
-      MemAliasPropagate(MatchState::FlowToWriteOnly,
-                        MatchState::FlowToMemAliasWriteOnly);
-      MemAliasPropagate(MatchState::FlowToReadWrite,
-                        MatchState::FlowToMemAliasReadWrite);
+    propagate(*FromNodeBelow, *ToNodeBelow, MatchState::FlowFromMemAliasNoReadWrite, Item.Context, ReachSet, WorkList);
+    for (const auto &ContextMapping : ReachSet.revReachableValueAliases(*FromNodeBelow)) {
+      if(auto NewContext = composeCallContexts(ContextMapping.first, Item.Context)) {
+         for (const auto &Mapping : ContextMapping.second) { 
+           auto Src = Mapping.first;
+           if (Mapping.second.test(static_cast<size_t>(MatchState::FlowFromReadOnly)))
+             propagate(Src, *ToNodeBelow, MatchState::FlowFromMemAliasReadOnly, *NewContext, ReachSet, WorkList);
+           if (Mapping.second.test(static_cast<size_t>(MatchState::FlowToWriteOnly)))
+             propagate(Src, *ToNodeBelow, MatchState::FlowToMemAliasWriteOnly, *NewContext, ReachSet, WorkList);
+           if (Mapping.second.test(static_cast<size_t>(MatchState::FlowToReadWrite)))
+             propagate(Src, *ToNodeBelow, MatchState::FlowToMemAliasReadWrite, *NewContext, ReachSet, WorkList);       
+	 }
+      }
     }
   }
 
@@ -577,49 +608,50 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
   // - If *X and *Y are memory aliases, then X and Y are value aliases
   // - If Y is an alias of X, then reverse assignment edges (if there is any)
   // should precede any assignment edges on the path from X to Y.
+ 
+  //TODO: use context to restrict propagation through function boundaries
+  // implement function summary propagation scheme
+  for (const auto &Edge : NodeInfo->ArgEdges)
+    propagate(FromNode, Edge.Other, Item.State, Item.Context, ReachSet, WorkList);
+  for (const auto &Edge : NodeInfo->RetEdges)
+    propagate(FromNode, Edge.Other, Item.State, Item.Context, ReachSet, WorkList);
+  for (const auto &Edge : NodeInfo->ReverseArgEdges)
+    propagate(FromNode, Edge.Other, Item.State, Item.Context, ReachSet, WorkList);
+
+
   auto NextAssignState = [&](MatchState State) {
     for (const auto &AssignEdge : NodeInfo->Edges)
-        propagate(FromNode, AssignEdge.Other, State, ReachSet, WorkList);
-    for (const auto &Edge : NodeInfo->ArgEdges)
-        propagate(FromNode, Edge.Other, State, ReachSet, WorkList);
-    for (const auto &Edge : NodeInfo->RetEdges)
-        propagate(FromNode, Edge.Other, State, ReachSet, WorkList);
+        propagate(FromNode, AssignEdge.Other, State, Item.Context, ReachSet, WorkList);
   };
   auto NextRevAssignState = [&](MatchState State) {
     for (const auto &RevAssignEdge : NodeInfo->ReverseEdges)
-        propagate(FromNode, RevAssignEdge.Other, State, ReachSet, WorkList);
-    for (const auto &Edge : NodeInfo->ReverseArgEdges) {
-        propagate(FromNode, Edge.Other, State, ReachSet, WorkList);
-    }
+        propagate(FromNode, RevAssignEdge.Other, State, Item.Context, ReachSet, WorkList);
   };
   auto NextMemState = [&](MatchState State) {
-    if (auto AliasSet = MemSet.getMemoryAliases(ToNode)) {
-      for (const auto &MemAlias : *AliasSet)
-        propagate(FromNode, MemAlias, State, ReachSet, WorkList);
-    }
+    if (const auto AliasSet = MemSet.getMemoryAliases(ToNode))
+      for (const auto &ContextMapping : *AliasSet)
+        if(auto NewContext = composeCallContexts(Item.Context, ContextMapping.first))
+	  for (const auto &MemAlias: ContextMapping.second)
+	    propagate(FromNode, MemAlias, State, *NewContext, ReachSet, WorkList);
   };
   
-  auto AfterRead = applyRead(Item.State);
-  if(AfterRead)
+  if(auto AfterRead = applyRead(Item.State))
     NextRevAssignState(*AfterRead);
   
   NextAssignState(applyWrite(Item.State));
   
-  auto AfterMem = applyMemAlias(Item.State);
-  if(AfterMem)
+  if(auto AfterMem = applyMemAlias(Item.State))
     NextMemState(*AfterMem);
  
   auto ToNodeAbove = getNodeAbove(Graph, ToNode);
   if (hasNonMemAliasState(toStateSet(Item.State)) && ToNodeAbove) 
   {
-	auto NodeAboveInfo = Graph.getNode(*ToNodeAbove);
-    for (const auto &Edge : NodeAboveInfo->Edges)
-      propagate(*ToNodeAbove, Edge.Other, MatchState::FlowToWriteOnly, ReachSet,
+    auto *NodeAboveInfo = Graph.getNode(*ToNodeAbove);
+
+    //should really be NoReadWrite
+    propagate(*ToNodeAbove, *ToNodeAbove, MatchState::FlowFromReadOnly, Item.Context, ReachSet,
         WorkList);
-    for (const auto &Edge : NodeAboveInfo->ReverseEdges) {
-      propagate(*ToNodeAbove, Edge.Other, MatchState::FlowFromReadOnly, ReachSet,
-        WorkList);
-    }
+    //TODO: propagate through Arg Ret edges
   }
 }
 
@@ -629,15 +661,13 @@ static void exploreFromNode(InstantiatedValue Node, const CFLGraph &Graph,
   auto NodeInfo = Graph.getNode(Node);
 
   assert(NodeInfo);
-  for (auto &Edge : NodeInfo->Edges) {
-    propagate(Node, Edge.Other, MatchState::FlowToWriteOnly, ReachSet,
-      WorkList);
-  }
-  for (auto &Edge : NodeInfo->ReverseEdges) {
-    propagate(Node, Edge.Other, MatchState::FlowFromReadOnly, ReachSet,
-      WorkList);
-  }
 
+  //should really be NoReadWrite
+  propagate(Node, Node, MatchState::FlowFromReadOnly, CallContext::Normal, ReachSet,
+      WorkList);
+
+
+  //TODO: propagate through Arg Ret edges
   while (!WorkList.empty()) {
     for (auto Itr = WorkList.rbegin(); Itr != WorkList.rend(); Itr++) {
       processWorkListItem(*Itr, Graph, ReachSet, MemSet, NextList);
@@ -678,50 +708,52 @@ bool buildTaintedValMap(DenseMap<const Function *, DenseSet<Value *>> &TaintedVa
     if (IVal.DerefLevel == 0 && Fn)
       TaintedValMap[Fn].insert(IVal.Val);
 
-    for (const auto &AliasMapping: ReachMap.reachableValueAliases(IVal)) {
-      auto Alias = AliasMapping.first;
-      auto AliasFn = parentFunctionOfValue(Alias.Val);
-      if (!AliasFn)
-	continue;
-      if (Alias.DerefLevel == 0)
-        TaintedValMap[AliasFn].insert(Alias.Val);
-
-      auto AddField = [&] (StructType *StructTy, uint64_t Offset) {
-	auto StructItr = GEPMap.find(StructTy);
-	if (StructItr == GEPMap.end()) 
-          return;
-
-	auto OffsetItr = StructItr->second.find(Offset);
-	if (OffsetItr ==StructItr->second.end()) 
-	  return;
-
-	for (auto *GEPOpAlias: OffsetItr->second)
-	  Changed |= TaintSources.addStates(InstantiatedValue{GEPOpAlias, Alias.DerefLevel}, AliasMapping.second).any();
-      };
-
-      auto AddAllFields = [&] (StructType *StructTy) {
-	auto StructItr = GEPMap.find(StructTy);
-	if (StructItr == GEPMap.end()) 
-          return;
-
-	for (auto &Mapping: StructItr->second)
-	  for (auto &GEPOpAlias: Mapping.second)
-	    Changed |= TaintSources.addStates(InstantiatedValue{GEPOpAlias, Alias.DerefLevel}, AliasMapping.second).any();
-      };
-
-      auto DL = AliasFn->getParent()->getDataLayout();
-      if (auto *GEPOp = dyn_cast<GEPOperator>(Alias.Val)) {
-        if (auto *StructTy = dyn_cast<StructType>(GEPOp->getSourceElementType())) {
-	  uint64_t Offset = getGEPOffset(*GEPOp, DL);
-	  if (Offset == UnknownOffset)
-	    AddAllFields(StructTy);
-	  else
-	    AddField(StructTy, Offset);
-	}
+    for (const auto &ContextMapping: ReachMap.reachableValueAliases(IVal)) {
+      for (const auto &AliasMapping: ContextMapping.second) {
+        auto Alias = AliasMapping.first;
+        const auto AliasFn = parentFunctionOfValue(Alias.Val);
+        if (!AliasFn)
+  	continue;
+        if (Alias.DerefLevel == 0)
+          TaintedValMap[AliasFn].insert(Alias.Val);
+  
+        auto AddField = [&] (StructType *StructTy, uint64_t Offset) {
+  	auto StructItr = GEPMap.find(StructTy);
+  	if (StructItr == GEPMap.end()) 
+            return;
+  
+  	auto OffsetItr = StructItr->second.find(Offset);
+  	if (OffsetItr ==StructItr->second.end()) 
+  	  return;
+  
+  	for (auto *GEPOpAlias: OffsetItr->second)
+  	  Changed |= TaintSources.addStates(InstantiatedValue{GEPOpAlias, Alias.DerefLevel}, AliasMapping.second).any();
+        };
+  
+        auto AddAllFields = [&] (StructType *StructTy) {
+  	auto StructItr = GEPMap.find(StructTy);
+  	if (StructItr == GEPMap.end()) 
+            return;
+  
+  	for (auto &Mapping: StructItr->second)
+  	  for (auto &GEPOpAlias: Mapping.second)
+  	    Changed |= TaintSources.addStates(InstantiatedValue{GEPOpAlias, Alias.DerefLevel}, AliasMapping.second).any();
+        };
+  
+        auto DL = AliasFn->getParent()->getDataLayout();
+        if (auto *GEPOp = dyn_cast<GEPOperator>(Alias.Val)) {
+          if (auto *StructTy = dyn_cast<StructType>(GEPOp->getSourceElementType())) {
+  	  uint64_t Offset = getGEPOffset(*GEPOp, DL);
+  	  if (Offset == UnknownOffset)
+  	    AddAllFields(StructTy);
+  	  else
+  	    AddField(StructTy, Offset);
+  	  }
+        }
+      
+        if (auto *StructTy = dyn_cast<StructType>(cast<PointerType>(Alias.Val->getType())->getElementType()))
+  	AddAllFields(StructTy);
       }
-    
-      if (auto *StructTy = dyn_cast<StructType>(cast<PointerType>(Alias.Val->getType())->getElementType()))
-	AddAllFields(StructTy);
     }
   }
   return Changed;
