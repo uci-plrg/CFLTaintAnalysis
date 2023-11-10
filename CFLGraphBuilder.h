@@ -55,7 +55,7 @@ struct ExternalVals {
   SmallVector<Value *, 4> VAArgs;
 };
 
-  using GEPMapType =  DenseMap<StructType *, DenseMap<unsigned, SmallVector<GEPOperator *, 4>>>;
+using GEPMapType =  DenseMap<StructType *, DenseMap<uint64_t, SmallVector<GEPOperator *, 4>>>;
 
 template <typename CFLAA> class CFLGraphBuilder {
   // Input of the builder
@@ -290,12 +290,10 @@ template <typename CFLAA> class CFLGraphBuilder {
 
       auto *Op = GEPOp.getPointerOperand();
       if (auto *StructTy = dyn_cast<StructType>(GEPOp.getSourceElementType())) {
-	errs() << "1\n";
-	addNode(&Op);
+	addNode(Op);
 	addNode(&GEPOp);
         GEPMap[StructTy][Offset].push_back(&GEPOp);
       } else {
-	errs() << "2\n";
         addAssignEdge(Op, &GEPOp, Offset);
       }
     }

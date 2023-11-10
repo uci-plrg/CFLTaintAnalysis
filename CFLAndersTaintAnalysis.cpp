@@ -669,21 +669,22 @@ static void processWorkList(ReachabilitySet &ReachSet,
   }
 }
 
-const TaintedSet buildTaintedValMap(DenseMap<const Function *, DenseSet<Value *>> &TaintedValMap, const TaintedSet &TaintSources, const ValueReachMap &ReachMap, const GEPMapType &GEPMap) {
-  TaintedSet NewTaintSources;
-  for (const auto &Mapping: TaintSources) {
+bool buildTaintedValMap(DenseMap<const Function *, DenseSet<Value *>> &TaintedValMap, TaintedSet &TaintSources, const ValueReachMap &ReachMap, const GEPMapType &GEPMap) {
+  bool Changed = false;
+  TaintedSet Copy = TaintSources;
+  for (const auto &Mapping: Copy) {
     auto IVal = Mapping.first;
     auto Fn = parentFunctionOfValue(IVal.Val);
-    if (IVal.DerefLevel == 0 && Fn) {
+    if (IVal.DerefLevel == 0 && Fn)
       TaintedValMap[Fn].insert(IVal.Val);
-    } 
+
     for (const auto &AliasMapping: ReachMap.reachableValueAliases(IVal)) {
       auto Alias = AliasMapping.first;
       auto AliasFn = parentFunctionOfValue(Alias.Val);
-      if (Alias.DerefLevel != 0 || !AliasFn)
+      if (!AliasFn)
 	continue;
-      
-      TaintedValMap[AliasFn].insert(Alias.Val);
+      if (Alias.DerefLevel == 0)
+        TaintedValMap[AliasFn].insert(Alias.Val);
 
       auto AddField = [&] (StructType *StructTy, uint64_t Offset) {
 	auto StructItr = GEPMap.find(StructTy);
@@ -695,7 +696,7 @@ const TaintedSet buildTaintedValMap(DenseMap<const Function *, DenseSet<Value *>
 	  return;
 
 	for (auto *GEPOpAlias: OffsetItr->second)
-	  NewTaintSources[InstantiatedValue{GEPOpAlias, 0}] = AliasMapping.second;
+	  Changed |= TaintSources.addStates(InstantiatedValue{GEPOpAlias, Alias.DerefLevel}, AliasMapping.second).any();
       };
 
       auto AddAllFields = [&] (StructType *StructTy) {
@@ -705,7 +706,7 @@ const TaintedSet buildTaintedValMap(DenseMap<const Function *, DenseSet<Value *>
 
 	for (auto &Mapping: StructItr->second)
 	  for (auto &GEPOpAlias: Mapping.second)
-	    NewTaintSources[InstantiatedValue{GEPOpAlias, 0}] = AliasMapping.second;
+	    Changed |= TaintSources.addStates(InstantiatedValue{GEPOpAlias, Alias.DerefLevel}, AliasMapping.second).any();
       };
 
       auto DL = AliasFn->getParent()->getDataLayout();
@@ -719,11 +720,11 @@ const TaintedSet buildTaintedValMap(DenseMap<const Function *, DenseSet<Value *>
 	}
       }
     
-      if (auto *StructTy = dyn_cast<StructType>(Alias.Val->getType()))
+      if (auto *StructTy = dyn_cast<StructType>(cast<PointerType>(Alias.Val->getType())->getElementType()))
 	AddAllFields(StructTy);
     }
   }
-  return NewTaintSources;
+  return Changed;
 }
 
 void
@@ -735,16 +736,15 @@ CFLAndersTaintResult::buildInfoFrom(const Module &M) {
     );
   auto &Graph = GraphBuilder.getCFLGraph();
   auto &GEPMap = GraphBuilder.getGEPMap();
-  auto TaintSources = Graph.getTainted();
+  TaintedSet TaintSources = Graph.getTainted();
  
   ReachabilitySet ReachSet;
   AliasMemSet MemSet;
-
-  while(!TaintSources.empty()) {
+  bool Changed = true;
+  while (Changed) {
     processWorkList(ReachSet, MemSet, Graph, TaintSources); 
     auto ReachMap = ReachSet.getReachMap();
-    auto NewTaintSources = buildTaintedValMap(TaintedValMap, TaintSources, ReachMap, GEPMap);
-    TaintSources.swap(NewTaintSources);
+    Changed = buildTaintedValMap(TaintedValMap, TaintSources, ReachMap, GEPMap);
   }
 }
 

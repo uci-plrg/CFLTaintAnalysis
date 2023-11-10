@@ -187,11 +187,11 @@ inline int64_t addOffset(int64_t LHS, int64_t RHS) {
 }
 
 static uint64_t getGEPOffset(const GEPOperator &GEPOp, const DataLayout &DL) {
-	uint64_t Offset = UnknownOffset;
-	APInt APOffset(DL.getPointerSizeInBits(GEPOp.getPointerAddressSpace()), 0);
-	if (GEPOp.accumulateConstantOffset(DL, APOffset) && APOffset.getSExtValue() >= 0)
-	  Offset = APOffset.getSExtValue();
-	return Offset;
+  uint64_t Offset = UnknownOffset;
+  APInt APOffset(DL.getPointerSizeInBits(GEPOp.getPointerAddressSpace()), 0);
+  if (GEPOp.accumulateConstantOffset(DL, APOffset) && APOffset.getSExtValue() >= 0)
+    Offset = APOffset.getSExtValue();
+  return Offset;
 }
 
 /// We use ExternalRelation to describe an externally visible aliasing relations
