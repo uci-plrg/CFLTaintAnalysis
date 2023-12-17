@@ -573,7 +573,7 @@ template <typename CFLAA> class CFLGraphBuilder {
     auto CallInstr = CS.getInstruction();
     auto ExtVals = ExtValMap[Callee];
     for (const auto RetVal: ExtVals.RetVals) 
-      Graph.addRetEdge(InstantiatedValue{RetVal, 0}, InstantiatedValue{CallInstr, 0}, CS);
+      Graph.addRetEdge(RetVal, CallInstr, CS);
     for (unsigned ArgNo = 0; ArgNo < Callee->arg_size(); ArgNo++) {
        auto ActualArgVal = CS.getArgument(ArgNo);
        if(!ActualArgVal->getType()->isPointerTy())
@@ -581,9 +581,7 @@ template <typename CFLAA> class CFLGraphBuilder {
        auto FormalArgVal = (Argument *)(Callee->arg_begin() + ArgNo);
        if(!FormalArgVal->getType()->isPointerTy())
          continue;
-       auto FormalArg = InstantiatedValue{FormalArgVal, 0};
-       auto ActualArg = InstantiatedValue{ActualArgVal, 0};
-       Graph.addArgEdge(ActualArg, FormalArg, CS);
+       Graph.addArgEdge(ActualArgVal, FormalArgVal, CS);
     }
   }
 

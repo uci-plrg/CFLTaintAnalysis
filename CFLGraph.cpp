@@ -50,6 +50,13 @@ CFLGraph::CFLGraph() {}
 
     unsigned CFLGraph::ValueInfo::getNumLevels() const { return Levels.size(); }
 
+  CFLGraph::ValueInfo *CFLGraph::getValueInfo(Value *V) {
+    auto Itr = ValueImpls.find(V);
+    if (Itr == ValueImpls.end())
+	  return nullptr;
+    return &Itr->second;
+  }
+
   CFLGraph::NodeInfo *CFLGraph::getNode(Node N) {
     auto Itr = ValueImpls.find(N.Val);
     if (Itr == ValueImpls.end() || Itr->second.getNumLevels() <= N.DerefLevel)
@@ -111,23 +118,30 @@ CFLGraph::CFLGraph() {}
 
   }
 
-  void CFLGraph::addArgEdge(Node From, Node To, CallSite CS) {
-    auto *FromInfo = getNode(From);
+  void CFLGraph::addArgEdge(Value *From, Value *To, CallSite CS) {
+	auto *FromInfo = getValueInfo(From);
     assert(FromInfo != nullptr);
-    auto *ToInfo = getNode(To);
+    auto *ToInfo = getValueInfo(To);
     assert(ToInfo != nullptr);
 
     FromInfo->ArgEdges.push_back(CallEdge{To, CS});
     ToInfo->ReverseArgEdges.push_back(CallEdge{From, CS}); 
   }
 
-  void CFLGraph::addRetEdge(Node From, Node To, CallSite CS) {
-    auto *FromInfo = getNode(From);
+  void CFLGraph::addRetEdge(Value *From, Value *To, CallSite CS) {
+    auto *FromInfo = getValueInfo(From);
     assert(FromInfo != nullptr);
-    auto *ToInfo = getNode(To);
+    auto *ToInfo = getValueInfo(To);
     assert(ToInfo != nullptr);
 
     FromInfo->RetEdges.push_back(CallEdge{To, CS});
+  }
+
+  const CFLGraph::ValueInfo *CFLGraph::getValueInfo(Value *V) const{
+    auto Itr = ValueImpls.find(V);
+    if (Itr == ValueImpls.end())
+	  return nullptr;
+    return &Itr->second;
   }
 
   const CFLGraph::NodeInfo *CFLGraph::getNode(Node N) const {

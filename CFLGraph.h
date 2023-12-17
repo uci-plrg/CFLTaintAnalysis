@@ -47,7 +47,7 @@ public:
 
    //function arguments can propagate aliases both in and out of functions, return values can only propagate out of functions. 
   struct CallEdge {
-    Node Other;
+    Value *Other;
     CallSite CS; 
   };
 
@@ -56,7 +56,6 @@ public:
 
   struct NodeInfo {
     EdgeList Edges, ReverseEdges;
-    CallEdgeList ArgEdges, ReverseArgEdges, RetEdges;
     AliasAttrs Attr;
   };
 
@@ -65,6 +64,8 @@ public:
 
   public:
     
+    CallEdgeList ArgEdges, ReverseArgEdges, RetEdges;
+
 	bool addNodeToLevel(unsigned Level);
 
     NodeInfo &getNodeInfoAtLevel(unsigned Level);
@@ -82,6 +83,8 @@ private:
     
   TaintedSet Tainted;
 
+  ValueInfo *getValueInfo(Value *V);
+
   NodeInfo *getNode(Node N);
  
   void addTaintByAttributes(Node N, AliasAttrs Attr);
@@ -90,16 +93,18 @@ public:
   using const_value_iterator = ValueMap::const_iterator;
 
   unsigned getCurMaxLevel(const Value* Val) const; 
-  
+
   bool addNode(Node N, AliasAttrs Attr = AliasAttrs(), StateSet TaintStates = StateSet());
 
   void addAttr(Node N, AliasAttrs Attr);
 
   void addEdge(Node From, Node To, int64_t Offset = 0);
   
-  void addArgEdge(Node From, Node To, CallSite CS);
+  void addArgEdge(Value *From, Value *To, CallSite CS);
   
-  void addRetEdge(Node From, Node To, CallSite CS);
+  void addRetEdge(Value *From, Value *To, CallSite CS);
+
+  const ValueInfo *getValueInfo(Value *V) const; 
 
   const NodeInfo *getNode(Node N) const;  
 
