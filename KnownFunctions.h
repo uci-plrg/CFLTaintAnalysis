@@ -13,7 +13,6 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
-#include "llvm/Support/CommandLine.h"
 
 #include <algorithm>
 
@@ -26,11 +25,11 @@ static const std::string noAliasFunctions[] = {
 	//libc functions
 	"abort",
 	"__cxa_begin_catch", 
-    "calloc",
+    	"calloc",
 	"dup",
 	"gnu_dev_major",
 	"gnu_dev_minor",
-    "malloc",
+    	"malloc",
 	"rand",
 	//Linux standard base functions
 	"dlopen",
@@ -274,7 +273,7 @@ bool handleKnownFunctions(const CallSite CS, const TargetLibraryInfo *TLI, CFLGr
 	
   if (isAllocationFn(I, TLI)) {
     if (AllAllocPM)
-	Graph.addNode(IV, AliasAttrs(), toStateSet(MatchState::FlowToWriteOnly));
+      Graph.addNode(IV, AliasAttrs(), toStateSet(MatchState::FlowToWriteOnly));
     return true;
   }
 
@@ -285,17 +284,23 @@ bool handleKnownFunctions(const CallSite CS, const TargetLibraryInfo *TLI, CFLGr
   if (Callee == nullptr)
     return false;
 
-  std::string FnName = Callee->getName().str();
-
-  if(is_contained(PMAllocators, FnName)) {
-	Graph.addNode(IV, AliasAttrs(), toStateSet(MatchState::FlowToWriteOnly));
-	return true;
-  }
-  if(is_contained(PMAllocatorsArg7Lv1, FnName)) {
-	auto Arg = CS.getArgOperand(7);
-	Graph.addNode(InstantiatedValue{Arg, 1}, AliasAttrs(), toStateSet(MatchState::FlowToWriteOnly));
+  std::string FnName = getDemangledName(*Callee).str();
+  
+  if (Callee->hasFnAttribute(PMAllocAnno)) {
+    StringRef AttrStr = Callee->getFnAttribute(PMAllocAnno).getValueAsString();
+    assert(!AttrStr.empty());
+    while (!AttrStr.empty()) {
+      auto Pair = AttrStr.split("|");
+      auto PMInfo = Pair.first.split(",");
+      Value *Val = PMInfo.first == "r" ?
+        IV.Val : CS.getArgOperand(std::stoul(PMInfo.first));
+      unsigned Lvl = std::stoul(PMInfo.second);
+	  Graph.addNode(InstantiatedValue{Val, Lvl}, AliasAttrs(), toStateSet(MatchState::FlowToWriteOnly));
+      AttrStr = Pair.second;
+    }
     return true;
   }
+
   if(is_contained(noAliasFunctions, FnName))
 	return true;
 	
@@ -687,12 +692,12 @@ bool handleKnownFunctions(const CallSite CS, const TargetLibraryInfo *TLI, CFLGr
 		return true;
 	}
     //pointee of return value aliases with first arg
-    case LibFunc_memcpy_chk:
-    case LibFunc_memmove_chk:
-    case LibFunc_memccpy:
-    case LibFunc_memcpy:
-    case LibFunc_memmove:
-    case LibFunc_mempcpy: {
+        case LibFunc_memcpy_chk:
+        case LibFunc_memmove_chk:
+        case LibFunc_memccpy:
+        case LibFunc_memcpy:
+        case LibFunc_memmove:
+        case LibFunc_mempcpy: {
 		if(maxDerefLevel(I) > 1) {
 			auto arg0 = CS.getArgument(0);
 			Graph.addNode(InstantiatedValue{arg0, 1});

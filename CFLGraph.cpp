@@ -92,7 +92,7 @@ CFLGraph::CFLGraph() {}
     auto &NodeInfo = ValInfo.getNodeInfoAtLevel(N.DerefLevel);
     NodeInfo.Attr |= Attr;
     
-    addTaintByAttributes(N, Attr);
+    //addTaintByAttributes(N, Attr);
     if(TaintedStates.any())
       Tainted.addStates(N, TaintedStates); 
 

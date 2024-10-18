@@ -561,7 +561,7 @@ static void propagate(InstantiatedValue From, InstantiatedValue To,
 
 }
 
-void callSiteCleanup(const WorkListItem& Item, ReachabilitySet &ReachSet, const CFLGraph &Graph, std::vector<WorkListItem> &WorkList) {
+static void callSiteCleanup(const WorkListItem& Item, ReachabilitySet &ReachSet, const CFLGraph &Graph, std::vector<WorkListItem> &WorkList) {
   assert(Item.CS);
   auto From = Item.From;
   auto To = Item.To;
@@ -689,13 +689,9 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
   auto ToNodeAbove = getNodeAbove(Graph, ToNode);
   if (hasNonMemAliasState(toStateSet(Item.State)) && ToNodeAbove) 
   {
-    //auto *NodeAboveInfo = Graph.getNode(*ToNodeAbove);
-
     //should really be NoReadWrite
     propagate(*ToNodeAbove, *ToNodeAbove, MatchState::FlowFromReadOnly, ReachSet,
         WorkList, IsCallee);
-
-    //propagate(ToNode, FromNode, Item.State, ReachSet, WorkList, IsCallee);
   }
 }
 
@@ -803,6 +799,28 @@ bool buildTaintedValMap(DenseMap<const Function *, DenseSet<Value *>> &TaintedVa
   return Changed;
 }
 
+static void processAnnotation(Module &M) {
+  for (auto Pair: PMAllocatorAnnos) {
+    if (auto* Fn = M.getFunction(Pair.FnName))
+      Fn->addFnAttr(PMAllocAnno, Pair.Anno);
+  }
+
+  GlobalVariable *GlobalAnnos = M.getNamedGlobal("llvm.global.annotations");
+  if (!GlobalAnnos)
+    return;
+
+  ConstantArray *A = cast<ConstantArray>(GlobalAnnos->getOperand(0));
+  for (unsigned I=0; I < A->getNumOperands(); I++) {
+    ConstantStruct *E = cast<ConstantStruct>(A->getOperand(I));
+    if (Function *Fn = dyn_cast<Function>(E->getOperand(0)->getOperand(0))) {
+      StringRef Anno = cast<ConstantDataArray>(cast<GlobalVariable>(E->getOperand(1)->getOperand(0))->getOperand(0))->getAsCString();
+      std::pair<StringRef, StringRef> Split = Anno.split(":");
+      if (Split.first == PMAllocAnno)
+        Fn->addFnAttr(Split.first, Split.second);
+    }
+  }
+}
+
 void
 CFLAndersTaintResult::buildInfoFrom(const Module &M) {  
   CFLGraphBuilder<CFLAndersTaintResult> GraphBuilder(
@@ -852,6 +870,7 @@ static RegisterPass<CFLAndersTaintWrapperPass> X("cfl-anders-taint", "Inclusion-
 bool CFLAndersTaintWrapperPass::runOnModule(Module &M) {
   auto &TLIWP = getAnalysis<TargetLibraryInfoWrapperPass>();
   Result.reset(new CFLAndersTaintResult(TLIWP.getTLI()));
+  processAnnotation(M);
   Result->buildInfoFrom(M);
   return true;
 }
