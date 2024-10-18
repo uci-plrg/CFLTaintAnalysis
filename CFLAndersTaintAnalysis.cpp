@@ -385,7 +385,7 @@ public:
 
   // Insert edge 'From->To' at state 'State'
   bool insert(InstantiatedValue From, InstantiatedValue To, MatchState State) {
-    assert(From != To);
+    //assert(From != To);
     auto &RevStates = RevReachMap[To][From];
     auto &States = ReachMap[From][To];
     auto Idx = static_cast<size_t>(State);
@@ -398,7 +398,7 @@ public:
   }
 
   bool insertStates(InstantiatedValue From, InstantiatedValue To, StateSet NewStates) {
-    assert(From != To);
+    //assert(From != To);
     auto &RevStates = RevReachMap[To][From];
     auto &States = ReachMap[From][To];
     if ((~RevStates & NewStates).any()) {
@@ -553,7 +553,7 @@ static void propagate(InstantiatedValue From, InstantiatedValue To,
                       MatchState State, ReachabilitySet &ReachSet,
                       std::vector<WorkListItem> &WorkList, bool IsCallee = false, 
 					  Optional<CallSite> CS = None) {
-  if (From == To || ReachSet.insert(From, To, State)) {
+  if (ReachSet.insert(From, To, State)) {
     if(isa<ConstantPointerNull>(To.Val))
 		return;
     WorkList.push_back(WorkListItem{From, To, State, IsCallee, CS});
@@ -647,10 +647,10 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
 
   for (const auto &Edge : ValueInfo->ArgEdges) {
 	auto Other = InstantiatedValue{Edge.Other, ToNode.DerefLevel};
-    propagate(FromNode, Other, Item.State, ReachSet, WorkList, IsCallee, true, Edge.CS);
+    	propagate(FromNode, Other, Item.State, ReachSet, WorkList, true, Edge.CS);
 	propagate(Other, Other, MatchState::FlowFromReadOnly, ReachSet, WorkList, IsCallee);
   }
-  if (!Item.IsCallee) {
+  if (IsCallee) {
     for (const auto &Edge : ValueInfo->RetEdges) {
 	  auto Other = InstantiatedValue{Edge.Other, ToNode.DerefLevel};
       propagate(FromNode, Other, Item.State, ReachSet, WorkList, IsCallee);
@@ -689,14 +689,13 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
   auto ToNodeAbove = getNodeAbove(Graph, ToNode);
   if (hasNonMemAliasState(toStateSet(Item.State)) && ToNodeAbove) 
   {
-    auto *NodeAboveInfo = Graph.getNode(*ToNodeAbove);
+    //auto *NodeAboveInfo = Graph.getNode(*ToNodeAbove);
 
     //should really be NoReadWrite
     propagate(*ToNodeAbove, *ToNodeAbove, MatchState::FlowFromReadOnly, ReachSet,
         WorkList, IsCallee);
 
-	propagate(ToNode, FromNode, Item.State, ReachSet,
-        WorkList, IsCallee, true);
+    //propagate(ToNode, FromNode, Item.State, ReachSet, WorkList, IsCallee);
   }
 }
 
@@ -748,11 +747,15 @@ bool buildTaintedValMap(DenseMap<const Function *, DenseSet<Value *>> &TaintedVa
   for (const auto &Mapping: Copy) {
     auto IVal = Mapping.first;
     auto Fn = parentFunctionOfValue(IVal.Val);
+    if(isa<ConstantPointerNull>(IVal.Val))
+      continue;
     if (IVal.DerefLevel == 0 && Fn)
       TaintedValMap[Fn].insert(IVal.Val);
 
     for (const auto &AliasMapping: ReachMap.reachableValueAliases(IVal)) {
       auto Alias = AliasMapping.first;
+      if(isa<ConstantPointerNull>(Alias.Val))
+        continue;
       const auto AliasFn = parentFunctionOfValue(Alias.Val);
       if (!AliasFn)
   	    continue;

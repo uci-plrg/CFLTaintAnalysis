@@ -71,7 +71,7 @@ bool isGlobalOrArgAttr(AliasAttrs Attr) {
 bool hasGlobalAttr(AliasAttrs Attr) { return Attr.test(AttrGlobalIndex); }
 
 StateSet TaintedSet::addStates(InstantiatedValue IVal, StateSet NewStates) {
-  assert(NewStates.any());
+  //assert(NewStates.any());
   auto Itr = find(IVal);
   if(Itr == end()) {
     try_emplace(IVal, NewStates);

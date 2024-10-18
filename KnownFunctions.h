@@ -13,13 +13,14 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/Support/CommandLine.h"
 
 #include <algorithm>
 
-//#define ALL_ALLOC_FN_PMEM 1
-
 using namespace llvm;
 using namespace llvm::cflta;
+
+static cl::opt<bool> AllAllocPM("all-alloc-pmem", cl::desc("Treat all allocator functions as PMEM"));
 
 static const std::string noAliasFunctions[] = {
 	//libc functions
@@ -272,10 +273,9 @@ bool handleKnownFunctions(const CallSite CS, const TargetLibraryInfo *TLI, CFLGr
   }
 	
   if (isAllocationFn(I, TLI)) {
-#ifdef ALL_ALLOC_FN_PMEM
+    if (AllAllocPM)
 	Graph.addNode(IV, AliasAttrs(), toStateSet(MatchState::FlowToWriteOnly));
-#endif
-	return true;
+    return true;
   }
 
   if (isFreeCall(I, TLI))
