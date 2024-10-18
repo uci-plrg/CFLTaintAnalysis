@@ -378,7 +378,9 @@ public:
 };
 
 class ReachabilitySet {
+  // the set of all ('From', 'State') tuples for a given node 'To'
   ValueReachMap RevReachMap;
+  // the set of all ('To', 'State') tuples for a given node 'From'
   ValueReachMap ReachMap;
 public:
   using const_value_iterator = ValueReachMap::const_iterator;
@@ -409,24 +411,16 @@ public:
     return false;
   }
 
-  // Return the set of all ('From', 'State') tuples for a given node 'To'
-  iterator_range<ValueStateMap::const_iterator>
-  revReachableValueAliases(InstantiatedValue V) const {
-    return RevReachMap.reachableValueAliases(V);
-  }
-
-  // Return the set of all ('To', 'State') tuples for a given node 'From'
-  iterator_range<ValueStateMap::const_iterator>
-  reachableValueAliases(InstantiatedValue V) const {
-    return ReachMap.reachableValueAliases(V);
-  }
-
   iterator_range<const_value_iterator> value_mappings() const {
     return make_range<const_value_iterator>(RevReachMap.begin(), RevReachMap.end());
   }
 
   ValueReachMap getReachMap() const {
     return ReachMap;
+  }
+  
+  ValueReachMap getRevReachMap() const {
+    return RevReachMap;
   }
 };
 
@@ -565,7 +559,8 @@ static void callSiteCleanup(const WorkListItem& Item, ReachabilitySet &ReachSet,
   assert(Item.CS);
   auto From = Item.From;
   auto To = Item.To;
-  for (auto &AliasMapping: ReachSet.reachableValueAliases(To)) {
+  ValueReachMap Map = ReachSet.getReachMap();
+  for (auto &AliasMapping: Map.reachableValueAliases(To)) {
     auto NewStates = composeStateSets(toStateSet(Item.State), AliasMapping.second);
 	ReachSet.insertStates(From, AliasMapping.first, NewStates);
 	if (auto *ValueInfo = Graph.getValueInfo(AliasMapping.first.Val)) {
@@ -622,7 +617,8 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
   
   if (FromNodeBelow && ToNodeBelow && MemSet.insert(*FromNodeBelow, *ToNodeBelow)) {
     //propagate(*FromNodeBelow, *ToNodeBelow, MatchState::FlowFromMemAliasNoReadWrite,  ReachSet, WorkList, IsCallee);
-    for (const auto &Mapping : ReachSet.revReachableValueAliases(*FromNodeBelow)) {
+    ValueReachMap Map = ReachSet.getRevReachMap();
+    for (const auto &Mapping : Map.reachableValueAliases(*FromNodeBelow)) {
            auto Src = Mapping.first;
            if (Mapping.second.test(static_cast<size_t>(MatchState::FlowFromReadOnly)))
              propagate(Src, *ToNodeBelow, MatchState::FlowFromMemAliasReadOnly, ReachSet, WorkList, IsCallee);

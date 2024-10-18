@@ -94,8 +94,7 @@ static inline StringRef getDemangledName(const Function& Fn) {
   int status;
   auto demangled = abi::__cxa_demangle(FName.begin(), 0, 0, &status);
   if (status==0) {
-  		errs() << "demangled function name " << FName << " to " << demangled << "\n\n";
-  	    FName = demangled;
+    FName = demangled;
   }
   return FName;
 }
