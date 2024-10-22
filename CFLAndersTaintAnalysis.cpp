@@ -367,7 +367,6 @@ public:
   iterator_range<ValueStateMap::const_iterator>
   reachableValueAliases(InstantiatedValue V) const {
     auto Itr = find(V);
-    //errs() << "reachableValueAliases for " << V << "\n";
     if (Itr == end()) {
       return make_range<ValueStateMap::const_iterator>(ValueStateMap::const_iterator(),
                                                        ValueStateMap::const_iterator());
@@ -485,8 +484,13 @@ struct WorkListItem {
   InstantiatedValue From;
   InstantiatedValue To;
   MatchState State;
-  bool IsCallee;
-  Optional<CallSite> CS;
+};
+
+struct CSListItem {
+  InstantiatedValue From;
+  InstantiatedValue To;
+  MatchState State;
+  CallSite CS;
 };
 
 } // end anonymous namespace
@@ -545,30 +549,49 @@ template <> struct DenseMapInfo<OffsetInstantiatedValue> {
 
 static void propagate(InstantiatedValue From, InstantiatedValue To,
                       MatchState State, ReachabilitySet &ReachSet,
-                      std::vector<WorkListItem> &WorkList, bool IsCallee = false, 
-					  Optional<CallSite> CS = None) {
+                      std::vector<WorkListItem> &WorkList) {
   if (ReachSet.insert(From, To, State)) {
     if(isa<ConstantPointerNull>(To.Val))
-		return;
-    WorkList.push_back(WorkListItem{From, To, State, IsCallee, CS});
+      return;
+    WorkList.push_back(WorkListItem{From, To, State});
   }
 
 }
 
-static void callSiteCleanup(const WorkListItem& Item, ReachabilitySet &ReachSet, const CFLGraph &Graph, std::vector<WorkListItem> &WorkList) {
-  assert(Item.CS);
+static void callSitePropagate(CSListItem Item, ReachabilitySet &ReachSet,
+                      std::vector<CSListItem> &CSList) {
+  if (ReachSet.insert(Item.From, Item.To, Item.State)) {
+    if(isa<ConstantPointerNull>(Item.To.Val))
+      return;
+    CSList.push_back(Item);
+  }
+
+}
+static void callSiteCleanup(const CSListItem& Item, ReachabilitySet &ReachSet, const CFLGraph &Graph, std::vector<WorkListItem> &WorkList) {
   auto From = Item.From;
   auto To = Item.To;
   ValueReachMap Map = ReachSet.getReachMap();
+  //auto FuncName = Item.CS.getCalledFunction()->getName();
+  //if (FuncName == "obj_descr_create")
+  //  errs() << "clean up callsite " << *Item.CS.getInstruction() << " from " << From << " to " << To << " state " << Item.State << "\n";
   for (auto &AliasMapping: Map.reachableValueAliases(To)) {
     auto NewStates = composeStateSets(toStateSet(Item.State), AliasMapping.second);
-	ReachSet.insertStates(From, AliasMapping.first, NewStates);
-	if (auto *ValueInfo = Graph.getValueInfo(AliasMapping.first.Val)) {
-	  for (auto &Edge: ValueInfo->RetEdges)
-	    if (Item.CS == Edge.CS)
-		  for (std::size_t i = 0; i < NewStates.size(); ++i)
-		    if (NewStates[i]) propagate(From, InstantiatedValue{Edge.Other, To.DerefLevel}, (MatchState)i, ReachSet, WorkList, Item.IsCallee);
-	}
+    //if (FuncName == "obj_descr_create")
+    //  errs() << "new alias " << AliasMapping.first << "\n";
+    if (!ReachSet.insertStates(From, AliasMapping.first, NewStates))
+      continue;
+    if (auto *ValueInfo = Graph.getValueInfo(AliasMapping.first.Val)) {
+      for (auto &Edge: ValueInfo->RetEdges)
+        if (Item.CS == Edge.CS) {
+    	  for (std::size_t i = 0; i < NewStates.size(); ++i)
+    	    if (NewStates[i]) propagate(From, InstantiatedValue{Edge.Other, To.DerefLevel}, (MatchState)i, ReachSet, WorkList);
+        }
+      for (auto &Edge: ValueInfo->ReverseArgEdges)
+        if (Item.CS == Edge.CS) {
+    	  for (std::size_t i = 0; i < NewStates.size(); ++i)
+    	    if (NewStates[i]) propagate(From, InstantiatedValue{Edge.Other, To.DerefLevel}, (MatchState)i, ReachSet, WorkList);
+        }
+    }
   }
 }
 
@@ -592,17 +615,11 @@ static Optional<InstantiatedValue> getNodeAbove(const CFLGraph &Graph,
 
 static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
                                 ReachabilitySet &ReachSet, AliasMemSet &MemSet,
-                                std::vector<WorkListItem> &WorkList) {
-
-  if(Item.CS) {
-    callSiteCleanup(Item, ReachSet, Graph, WorkList);
-    return;
-  }
+                                std::vector<WorkListItem> &WorkList,
+                                std::vector<CSListItem> &CSList) {
 
   auto FromNode = Item.From;
   auto ToNode = Item.To; 
-  auto IsCallee  = Item.IsCallee;
-  //errs() << "item from " << Item.From << " to " << Item.To << " with " << Item.State << "\n";
 
   // FIXME: Here is a neat trick we can do: since both ReachSet and MemSet holds
   // relations that are symmetric, we could actually cut the storage by half by
@@ -614,18 +631,18 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
     
   auto FromNodeBelow = getNodeBelow(Graph, FromNode);
   auto ToNodeBelow = getNodeBelow(Graph, ToNode);
-  
+   
   if (FromNodeBelow && ToNodeBelow && MemSet.insert(*FromNodeBelow, *ToNodeBelow)) {
     //propagate(*FromNodeBelow, *ToNodeBelow, MatchState::FlowFromMemAliasNoReadWrite,  ReachSet, WorkList, IsCallee);
     ValueReachMap Map = ReachSet.getRevReachMap();
     for (const auto &Mapping : Map.reachableValueAliases(*FromNodeBelow)) {
            auto Src = Mapping.first;
            if (Mapping.second.test(static_cast<size_t>(MatchState::FlowFromReadOnly)))
-             propagate(Src, *ToNodeBelow, MatchState::FlowFromMemAliasReadOnly, ReachSet, WorkList, IsCallee);
+             propagate(Src, *ToNodeBelow, MatchState::FlowFromMemAliasReadOnly, ReachSet, WorkList);
            if (Mapping.second.test(static_cast<size_t>(MatchState::FlowToWriteOnly)))
-             propagate(Src, *ToNodeBelow, MatchState::FlowToMemAliasWriteOnly, ReachSet, WorkList, IsCallee);
+             propagate(Src, *ToNodeBelow, MatchState::FlowToMemAliasWriteOnly, ReachSet, WorkList);
            if (Mapping.second.test(static_cast<size_t>(MatchState::FlowToReadWrite)))
-             propagate(Src, *ToNodeBelow, MatchState::FlowToMemAliasReadWrite, ReachSet, WorkList, IsCallee);       
+             propagate(Src, *ToNodeBelow, MatchState::FlowToMemAliasReadWrite, ReachSet, WorkList);       
     }
   }
 
@@ -639,38 +656,37 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
   // should precede any assignment edges on the path from X to Y.
 
   auto ValueInfo = Graph.getValueInfo(ToNode.Val);
-  assert(ValueInfo); 
+  assert(ValueInfo);
+ 
+  auto startExplore = [&] (InstantiatedValue Node) {
+    auto NodeInfo = Graph.getNode(Node);
+    assert(NodeInfo);
+    for (const auto &Edge : NodeInfo->Edges)
+      propagate(Node, Edge.Other, MatchState::FlowToWriteOnly, ReachSet, WorkList);
+    for (const auto &Edge : NodeInfo->ReverseEdges)
+      propagate(Node, Edge.Other, MatchState::FlowFromReadOnly, ReachSet, WorkList);
+  };
 
   for (const auto &Edge : ValueInfo->ArgEdges) {
 	auto Other = InstantiatedValue{Edge.Other, ToNode.DerefLevel};
-    	propagate(FromNode, Other, Item.State, ReachSet, WorkList, true, Edge.CS);
-	propagate(Other, Other, MatchState::FlowFromReadOnly, ReachSet, WorkList, IsCallee);
-  }
-  if (IsCallee) {
-    for (const auto &Edge : ValueInfo->RetEdges) {
-	  auto Other = InstantiatedValue{Edge.Other, ToNode.DerefLevel};
-      propagate(FromNode, Other, Item.State, ReachSet, WorkList, IsCallee);
-	} for (const auto &Edge : ValueInfo->ReverseArgEdges) {
-	  auto Other = InstantiatedValue{Edge.Other, ToNode.DerefLevel};
-      propagate(FromNode, Other, Item.State, ReachSet, WorkList, IsCallee);
-	}
+        callSitePropagate(CSListItem{FromNode, Other, Item.State, Edge.CS}, ReachSet, CSList);
+        startExplore(Other);
   }
  
   auto NodeInfo = Graph.getNode(ToNode);
   if (NodeInfo) {
-  
     auto NextAssignState = [&](MatchState State) {
       for (const auto &AssignEdge : NodeInfo->Edges)
-          propagate(FromNode, AssignEdge.Other, State, ReachSet, WorkList, IsCallee);
+        propagate(FromNode, AssignEdge.Other, State, ReachSet, WorkList);
     };
     auto NextRevAssignState = [&](MatchState State) {
       for (const auto &RevAssignEdge : NodeInfo->ReverseEdges)
-          propagate(FromNode, RevAssignEdge.Other, State, ReachSet, WorkList, IsCallee);
+        propagate(FromNode, RevAssignEdge.Other, State, ReachSet, WorkList);
     };
     auto NextMemState = [&](MatchState State) {
       if (const auto AliasSet = MemSet.getMemoryAliases(ToNode))
         for (const auto &MemAlias : *AliasSet)
-  	    propagate(FromNode, MemAlias, State, ReachSet, WorkList, IsCallee);
+  	  propagate(FromNode, MemAlias, State, ReachSet, WorkList);
     };
     
     if(auto AfterRead = applyRead(Item.State))
@@ -685,29 +701,35 @@ static void processWorkListItem(const WorkListItem &Item, const CFLGraph &Graph,
   auto ToNodeAbove = getNodeAbove(Graph, ToNode);
   if (hasNonMemAliasState(toStateSet(Item.State)) && ToNodeAbove) 
   {
-    //should really be NoReadWrite
-    propagate(*ToNodeAbove, *ToNodeAbove, MatchState::FlowFromReadOnly, ReachSet,
-        WorkList, IsCallee);
+    startExplore(*ToNodeAbove);
   }
 }
 
 static void exploreFromNode(InstantiatedValue Node, const CFLGraph &Graph,
                             ReachabilitySet &ReachSet, AliasMemSet &MemSet) {
   std::vector<WorkListItem> WorkList, NextList;
+  std::vector<CSListItem> CSList;
   auto NodeInfo = Graph.getNode(Node);
 
   assert(NodeInfo);
 
-  propagate(Node, Node, MatchState::FlowFromReadOnly, ReachSet,
+  for (const auto &Edge : NodeInfo->Edges)
+    propagate(Node, Edge.Other, MatchState::FlowToWriteOnly, ReachSet,
       WorkList);
 
-
   while (!WorkList.empty()) {
-    for (auto Itr = WorkList.rbegin(); Itr != WorkList.rend(); Itr++) {
-      processWorkListItem(*Itr, Graph, ReachSet, MemSet, NextList);
+    while (!WorkList.empty()) {
+      for (auto Itr = WorkList.rbegin(); Itr != WorkList.rend(); Itr++) {
+        processWorkListItem(*Itr, Graph, ReachSet, MemSet, NextList, CSList);
+      }
+
+      NextList.swap(WorkList);
+      NextList.clear();
     }
-    NextList.swap(WorkList);
-    NextList.clear();
+
+    for (auto Itr = CSList.begin(); Itr != CSList.end(); Itr++) {
+      callSiteCleanup(*Itr, ReachSet, Graph, WorkList);
+    }
   }
 }
 
@@ -751,6 +773,8 @@ bool buildTaintedValMap(DenseMap<const Function *, DenseSet<Value *>> &TaintedVa
       const auto AliasFn = parentFunctionOfValue(Alias.Val);
       if (!AliasFn)
   	    continue;
+      //if (AliasFn->getName() == "obj_descr_create")
+      //  errs() << "Alias " << *Alias.Val << " of source " << *IVal.Val << "\n";
       if (Alias.DerefLevel == 0)
         TaintedValMap[AliasFn].insert(Alias.Val);
   
@@ -836,6 +860,14 @@ CFLAndersTaintResult::buildInfoFrom(const Module &M) {
     auto ReachMap = ReachSet.getReachMap();
     Changed = buildTaintedValMap(TaintedValMap, TaintSources, ReachMap, GEPMap);
   }
+
+  //for (auto &Pair: TaintedValMap) {
+  //  if (Pair.first->getName() == "obj_descr_create") {
+  //    errs() << "tainted in " << Pair.first->getName() << "------------------\n";
+  //    for (auto Val: Pair.second)
+  //      errs() << *Val << "\n";
+  //  }
+  //}
 }
 
 Optional<DenseSet<Value *>> CFLAndersTaintResult::taintedVals(const Function &Fn) {

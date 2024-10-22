@@ -169,9 +169,9 @@ template <typename CFLAA> class CFLGraphBuilder {
 	  User *ITP = *Add->user_begin();
 	  if (auto ITPOp = dyn_cast<Operator>(ITP)) {
 	    if (ITPOp->getOpcode() == Instruction::IntToPtr) {
-	  	  auto Src = PTI->getOperand(0);
-	  	  Graph.addNode(InstantiatedValue{Src, 0});
-	  	  Graph.addNode(InstantiatedValue{ITP, 0});
+	      auto Src = PTI->getOperand(0);
+	      Graph.addNode(InstantiatedValue{Src, 0});
+	      Graph.addNode(InstantiatedValue{ITP, 0});
 	      Graph.addEdge(InstantiatedValue{Src, 0}, InstantiatedValue{ITP, 0});
 	      return true;	
 	    }
@@ -181,11 +181,11 @@ template <typename CFLAA> class CFLGraphBuilder {
 
 	bool handleIntToPtr(Operator *Op) {
 	  assert(Op->getOpcode() == Instruction::IntToPtr);
-      const Value *Src;
-      auto Add = Op->getOperand(0);
+          const Value *Src;
+          auto Add = Op->getOperand(0);
 	  if (match(Add, m_Add(m_PtrToInt(m_Value(Src)), m_Value())) &&
            Src->hasOneUse() && Add->hasOneUse())
-		 return true;
+            return true;
 	  return false;
 	}
 
