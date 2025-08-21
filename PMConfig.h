@@ -28,6 +28,8 @@ static const NameAnnoPair PMAllocatorAnnos[] = {
 	NameAnnoPair{"util_map_sync", "r,0"},
 	//libpmemobj
 	NameAnnoPair{"_ZL21pmemobj_direct_inline7pmemoid", "r,0"},  //pmemobj_direct_inline(pmemoid)
+	//libpmemobj
+	NameAnnoPair{"pmemobj_direct_inline", "r,0"},  //pmemobj_direct_inline(pmemoid)
 	//general purpose
 	NameAnnoPair{"mmap", "r,0|0,0"},
 	//libpmem2
